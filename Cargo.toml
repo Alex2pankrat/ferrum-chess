@@ -8,9 +8,7 @@ repository = "https://github.com/Alex2pankrat/ferrum-chess"
 
 [dependencies]
 iced = { version = "0.14", features = ["canvas", "tokio"] }
-shakmaty = "0.30"
-pgn-reader = "0.29"
-stockfish = "0.2.11"
+cozy-chess = { version = "0.3.4", features = ["std"] }
 rfd = "0.15"
 
 [profile.release]

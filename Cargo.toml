@@ -1,0 +1,20 @@
+[package]
+name = "ferrum-chess"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Offline chess desktop application"
+repository = "https://github.com/Alex2pankrat/ferrum-chess"
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "tokio"] }
+shakmaty = "0.30"
+pgn-reader = "0.29"
+stockfish = "0.2.11"
+rfd = "0.15"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

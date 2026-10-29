@@ -240,8 +240,12 @@ mod tests {
     use super::*;
     fn fake_engine(mode: &str) -> PathBuf {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
-        let path =
-            std::env::temp_dir().join(format!("ferrum-test-{}-{mode}{suffix}", std::process::id()));
+        static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ferrum-test-{}-{mode}-{id}{suffix}",
+            std::process::id()
+        ));
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_uci.rs");
         let status = Command::new("rustc")
             .arg("--edition=2021")
@@ -293,6 +297,21 @@ mod tests {
             .expect_err("cancelled")
             .contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn handshake_timeout_terminates_unresponsive_child() {
+        let path = fake_engine("hang");
+        let start = Instant::now();
+        let result = analyze_at(
+            &path,
+            &cozy_chess::Board::default().to_string(),
+            4,
+            &AtomicBool::new(false),
+        );
+        assert!(result.expect_err("timeout").contains("timed out"));
+        assert!(start.elapsed() < Duration::from_secs(15));
         let _ = std::fs::remove_file(path);
     }
 

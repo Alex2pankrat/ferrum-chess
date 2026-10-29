@@ -58,6 +58,31 @@ impl Game {
     pub fn moves(&self) -> Vec<String> {
         self.history.iter().map(|entry| entry.1.clone()).collect()
     }
+    /// Return a copy at a prior ply without changing the original game.
+    pub fn at_ply(&self, ply: usize) -> Option<Self> {
+        if ply > self.history.len() {
+            return None;
+        }
+        let mut game = self.clone();
+        while game.history.len() > ply {
+            game.undo();
+        }
+        Some(game)
+    }
+    /// Number each move from its actual starting position, including black-to-move FENs.
+    pub fn numbered_moves(&self) -> Vec<String> {
+        self.history
+            .iter()
+            .map(|(board, san, _)| {
+                let dots = if board.side_to_move() == Color::White {
+                    "."
+                } else {
+                    "..."
+                };
+                format!("{}{dots} {san}", board.fullmove_number())
+            })
+            .collect()
+    }
     pub fn legal_targets(&self, from: Square) -> Vec<Square> {
         let mut targets = Vec::new();
         self.position.generate_moves_for(from.bitboard(), |moves| {

@@ -26,7 +26,7 @@ impl Default for Game {
 
 impl Game {
     pub fn fen(&self) -> String {
-        Fen::from_position(self.position.clone(), EnPassantMode::Legal).to_string()
+        Fen::from_position(&self.position, EnPassantMode::Legal).to_string()
     }
     pub fn last_move(&self) -> Option<UciMove> {
         self.history.last().map(|entry| entry.2)
@@ -88,10 +88,10 @@ impl Game {
     }
     pub fn to_pgn(&self) -> String {
         let mut out = String::from("[Event \"Ferrum Chess\"]\n");
-        if Fen::from_position(self.initial.clone(), EnPassantMode::Legal).to_string()
-            != Fen::from_position(Chess::default(), EnPassantMode::Legal).to_string()
+        if Fen::from_position(&self.initial, EnPassantMode::Legal).to_string()
+            != Fen::from_position(&Chess::default(), EnPassantMode::Legal).to_string()
         {
-            let fen = Fen::from_position(self.initial.clone(), EnPassantMode::Legal);
+            let fen = Fen::from_position(&self.initial, EnPassantMode::Legal);
             out.push_str(&format!("[SetUp \"1\"]\n[FEN \"{fen}\"]\n"));
         }
         let outcome = self.position.outcome().to_string();

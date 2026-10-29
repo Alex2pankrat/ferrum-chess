@@ -135,7 +135,7 @@ enum Message {
     Engine(u64, Result<Analysis, String>),
     Open,
     Save,
-    Opened(u64, Result<Option<Game>, String>),
+    Opened(u64, Result<Option<Box<Game>>, String>),
     Saved(Result<bool, String>),
 }
 
@@ -307,7 +307,7 @@ impl App {
                             return Ok(None);
                         };
                         let data = std::fs::read(path).map_err(|e| e.to_string())?;
-                        Game::from_pgn(&data).map(Some)
+                        Game::from_pgn(&data).map(Box::new).map(Some)
                     }),
                     move |result| {
                         Message::Opened(generation, result.and_then(std::convert::identity))
@@ -320,7 +320,7 @@ impl App {
                 }
                 match result {
                     Ok(Some(game)) => {
-                        self.game = game;
+                        self.game = *game;
                         self.invalidate();
                         self.notice = "PGN loaded".into();
                         return self.maybe_search();

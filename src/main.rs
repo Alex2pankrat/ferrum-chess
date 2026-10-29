@@ -1,3 +1,4 @@
+mod preferences;
 mod ui;
 
 use ferrum_chess::{engine, game::Game};

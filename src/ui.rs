@@ -162,7 +162,7 @@ impl App {
         let fen = self.game.fen();
         let depth = self.depth;
         Task::perform(worker(move || engine::analyze(fen, depth)), move |result| {
-            Message::Engine(generation, result.and_then(|r| r))
+            Message::Engine(generation, result.and_then(std::convert::identity))
         })
     }
     fn maybe_search(&mut self) -> Task<Message> {
@@ -300,7 +300,9 @@ impl App {
                         let data = std::fs::read(path).map_err(|e| e.to_string())?;
                         Game::from_pgn(&data).map(Some)
                     }),
-                    move |result| Message::Opened(generation, result.and_then(|r| r)),
+                    move |result| {
+                        Message::Opened(generation, result.and_then(std::convert::identity))
+                    },
                 );
             }
             Message::Opened(generation, result) => {
@@ -332,7 +334,7 @@ impl App {
                         std::fs::write(path, pgn).map_err(|e| e.to_string())?;
                         Ok(true)
                     }),
-                    |result| Message::Saved(result.and_then(|r| r)),
+                    |result| Message::Saved(result.and_then(std::convert::identity)),
                 );
             }
             Message::Saved(result) => match result {

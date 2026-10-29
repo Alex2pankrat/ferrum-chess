@@ -195,3 +195,41 @@ mod tests {
         assert_eq!(game.moves(), parsed.moves());
     }
 }
+
+#[cfg(test)]
+mod rules_tests {
+    use super::*;
+
+    #[test]
+    fn castling_and_undo_round_trip() {
+        let mut game =
+            Game::from_pgn(b"[FEN \"r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1\"]\n\n1. O-O O-O-O *")
+                .expect("valid castling PGN");
+        let serialized = game.to_pgn();
+        let restored = Game::from_pgn(serialized.as_bytes()).expect("round trip");
+        assert_eq!(restored.fen(), game.fen());
+        assert!(game.undo());
+        assert!(game.undo());
+        assert_eq!(
+            game.position.board().piece_at(Square::E1),
+            Some(shakmaty::Color::White.king())
+        );
+    }
+
+    #[test]
+    fn invalid_pgn_is_rejected() {
+        assert!(Game::from_pgn(b"1. e4 e5 2. Qh9 *").is_err());
+    }
+
+    #[test]
+    fn legal_promotion_choices_are_respected() {
+        let mut game =
+            Game::from_pgn(b"[FEN \"4k3/P7/8/8/8/8/8/4K3 w - - 0 1\"]\n\n*").expect("valid FEN");
+        game.play(Square::A7, Square::A8, Role::Knight)
+            .expect("promotion");
+        assert_eq!(
+            game.position.board().piece_at(Square::A8),
+            Some(shakmaty::Color::White.knight())
+        );
+    }
+}

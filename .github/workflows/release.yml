@@ -74,6 +74,13 @@ jobs:
           $app = 'target/x86_64-pc-windows-msvc/dist/ferrum-chess.exe'
           if (!(Test-Path $app)) { throw 'cargo-dist did not produce the expected executable' }
           Copy-Item $app stage/ferrum-chess.exe
+      - name: Self-test packaged portable app with adjacent Stockfish
+        shell: pwsh
+        run: |
+          # Do not let the test-only override hide a broken adjacent-engine lookup.
+          Remove-Item Env:FERRUM_STOCKFISH -ErrorAction SilentlyContinue
+          & ./stage/ferrum-chess.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Portable application self-test failed' }
       - name: Package portable app and engine source
         shell: pwsh
         run: |
@@ -84,6 +91,23 @@ jobs:
           Copy-Item Cargo.lock release/Cargo.lock
           Copy-Item stockfish.zip release/stockfish-17.1-official.zip
           Invoke-WebRequest 'https://github.com/official-stockfish/Stockfish/archive/refs/tags/sf_17.1.zip' -OutFile release/stockfish-17.1-source.zip
+      - name: Verify portable and Stockfish archives
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          function Assert-ZipEntries($path, $patterns) {
+            $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $path).Path)
+            try {
+              foreach ($pattern in $patterns) {
+                if (!($zip.Entries | Where-Object { $_.FullName -match $pattern } | Select-Object -First 1)) {
+                  throw "Missing entry matching $pattern in $path"
+                }
+              }
+            } finally { $zip.Dispose() }
+          }
+          Assert-ZipEntries 'release/ferrum-chess-windows-portable.zip' @('(^|/)ferrum-chess\.exe$', '(^|/)stockfish\.exe$', '(^|/)Stockfish-GPL\.txt$', '(^|/)LICENSE-MIT$', '(^|/)LICENSE-APACHE$', '(^|/)OFL\.txt$')
+          Assert-ZipEntries 'release/stockfish-17.1-source.zip' @('(^|/)src/uci\.cpp$', '(^|/)Copying\.txt$')
+          Assert-ZipEntries 'release/stockfish-17.1-official.zip' @('(^|/)src/uci\.cpp$', '(^|/)Copying\.txt$')
       - name: Build MSI with WiX
         shell: pwsh
         run: |
@@ -134,6 +158,12 @@ jobs:
           $env:FERRUM_STOCKFISH = "$dir\stockfish.exe"
           cargo test --test game_flow stockfish_returns_a_legal_move_when_configured
           if ($LASTEXITCODE -ne 0) { throw 'Installed Stockfish integration test failed' }
+          Remove-Item Env:FERRUM_STOCKFISH -ErrorAction SilentlyContinue
+          & "$dir\ferrum-chess.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Installed app self-test with adjacent Stockfish failed' }
+          foreach ($file in @('LICENSE-MIT.txt', 'LICENSE-APACHE.txt', 'Stockfish-GPL.txt', 'Noto-OFL.txt')) {
+            if (!(Test-Path (Join-Path $dir $file))) { throw "Installed license missing: $file" }
+          }
           $app = Start-Process "$dir\ferrum-chess.exe" -PassThru
           Start-Sleep -Seconds 5
           $app.Refresh()
@@ -141,12 +171,37 @@ jobs:
           Stop-Process -Id $app.Id -Force
           $p = Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "MSI uninstall failed: $($p.ExitCode)" }
-          if (Test-Path "$dir\ferrum-chess.exe") { throw 'Executable remains after uninstall' }
-      - name: Upload test packages
+          foreach ($file in @('ferrum-chess.exe', 'stockfish.exe')) {
+            if (Test-Path (Join-Path $dir $file)) { throw "File remains after uninstall: $file" }
+          }
+          if (Test-Path $shortcut) { throw 'Start menu shortcut remains after uninstall' }
+      - name: Create and verify SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem release -File | Sort-Object Name)
+          if ($files.Count -eq 0) { throw 'No release files to checksum' }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          [IO.File]::WriteAllLines("$pwd\release\SHA256SUMS.txt", [string[]]$lines, [Text.Encoding]::ASCII)
+          foreach ($line in $lines) {
+            $hash, $name = $line -split '  ', 2
+            if ((Get-FileHash (Join-Path 'release' $name) -Algorithm SHA256).Hash -ine $hash) { throw "Checksum mismatch: $name" }
+          }
+      - name: Upload MSI for testing
         uses: actions/upload-artifact@v4
         with:
-          name: ferrum-chess-windows
-          path: release/*
+          name: ferrum-chess-msi
+          path: release/ferrum-chess-x64.msi
+          if-no-files-found: error
+      - name: Upload other test packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrum-chess-windows-other
+          path: |
+            release/*
+            !release/*.msi
           if-no-files-found: error
   publish:
     if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -157,8 +212,20 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: ferrum-chess-windows
+          name: ferrum-chess-msi
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: ferrum-chess-windows-other
+          path: release
+      - name: Verify downloaded assets before publishing
+        shell: pwsh
+        run: |
+          foreach ($line in Get-Content release/SHA256SUMS.txt) {
+            $hash, $name = $line -split '  ', 2
+            if (!$name -or !(Test-Path (Join-Path 'release' $name))) { throw "Missing asset: $name" }
+            if ((Get-FileHash (Join-Path 'release' $name) -Algorithm SHA256).Hash -ine $hash) { throw "Checksum mismatch: $name" }
+          }
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

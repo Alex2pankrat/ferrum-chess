@@ -945,6 +945,24 @@ fn piece_handle(set: PieceSet, color: Side, piece: Role) -> &'static svg::Handle
     &pieces[set_offset + offset + index]
 }
 
+// Return the shaft endpoint and the two corners of a scalable arrowhead.
+fn arrow_head(from: Point, to: Point, cell: f32) -> Option<(Point, Point, Point)> {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= f32::EPSILON {
+        return None;
+    }
+    let (x, y) = (dx / length, dy / length);
+    let tip = Point::new(to.x - x * cell * 0.28, to.y - y * cell * 0.28);
+    let half = cell * 0.18;
+    Some((
+        tip,
+        Point::new(tip.x - y * half, tip.y + x * half),
+        Point::new(tip.x + y * half, tip.y - x * half),
+    ))
+}
+
 #[derive(Default)]
 struct BoardState {
     pressed: Option<(Square, Point)>,
@@ -1046,6 +1064,8 @@ impl canvas::Program<Message> for Board<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
+        // Separate overlay keeps hints and capture targets above SVG pieces.
+        let mut overlay = Frame::new(renderer, bounds.size());
         let size = bounds.width.min(bounds.height);
         let cell = size / 8.0;
         let dragged = state.pressed.and_then(|(square, _)| {
@@ -1073,7 +1093,16 @@ impl canvas::Program<Message> for Board<'_> {
                 };
                 let is_last = matches!(last, Some((from, to)) if square == from || square == to);
                 let light = (x + y) % 2 == 0;
-                let color = if self.app.selected == Some(square) {
+                let in_check = self
+                    .app
+                    .game
+                    .position
+                    .king(self.app.game.position.side_to_move())
+                    == square
+                    && !self.app.game.position.checkers().is_empty();
+                let color = if in_check {
+                    Color::from_rgb8(198, 105, 91)
+                } else if self.app.selected == Some(square) {
                     Color::from_rgb8(225, 198, 108)
                 } else if is_last {
                     if light {
@@ -1086,13 +1115,20 @@ impl canvas::Program<Message> for Board<'_> {
                 };
                 frame.fill_rectangle(top_left, Size::new(cell, cell), color);
                 if targets.contains(&square) {
-                    frame.fill(
-                        &Path::circle(
-                            Point::new(top_left.x + cell / 2.0, top_left.y + cell / 2.0),
-                            cell * 0.14,
-                        ),
-                        Color::from_rgba8(24, 46, 35, 0.35),
-                    );
+                    let center = Point::new(top_left.x + cell / 2.0, top_left.y + cell / 2.0);
+                    if self.app.game.position.piece_on(square).is_some() {
+                        overlay.stroke(
+                            &Path::circle(center, cell * 0.44),
+                            Stroke::default()
+                                .with_width(cell * 0.08)
+                                .with_color(Color::from_rgba8(24, 46, 35, 0.55)),
+                        );
+                    } else {
+                        frame.fill(
+                            &Path::circle(center, cell * 0.14),
+                            Color::from_rgba8(24, 46, 35, 0.35),
+                        );
+                    }
                 }
                 if dragged.is_none_or(|(dragged_square, _)| dragged_square != square) {
                     if let (Some(color), Some(piece)) = (
@@ -1161,18 +1197,24 @@ impl canvas::Program<Message> for Board<'_> {
         if let Some((from, to)) = hint {
             let a = self.center(from, size);
             let b = self.center(to, size);
-            frame.stroke(
-                &Path::line(a, b),
-                Stroke::default()
-                    .with_width(cell * 0.11)
-                    .with_color(Color::from_rgba8(242, 153, 45, 0.8)),
-            );
-            frame.fill(
-                &Path::circle(b, cell * 0.13),
-                Color::from_rgb8(242, 153, 45),
-            );
+            if let Some((tip, left, right)) = arrow_head(a, b, cell) {
+                let orange = Color::from_rgba8(242, 153, 45, 0.85);
+                overlay.stroke(
+                    &Path::line(a, tip),
+                    Stroke::default().with_width(cell * 0.11).with_color(orange),
+                );
+                overlay.fill(
+                    &Path::new(|builder| {
+                        builder.move_to(b);
+                        builder.line_to(left);
+                        builder.line_to(right);
+                        builder.close();
+                    }),
+                    orange,
+                );
+            }
         }
-        vec![frame.into_geometry()]
+        vec![frame.into_geometry(), overlay.into_geometry()]
     }
 }
 
@@ -1208,6 +1250,16 @@ mod tests {
                 assert_eq!(board.square(board.center(square, size), size), Some(square));
             }
         }
+    }
+
+    #[test]
+    fn hint_arrow_is_scalable_and_handles_zero_length() {
+        let from = Point::new(0.0, 0.0);
+        let to = Point::new(100.0, 0.0);
+        let (tip, left, right) = arrow_head(from, to, 50.0).unwrap();
+        assert!((tip.x - 86.0).abs() < 0.01);
+        assert!(left.y > 0.0 && right.y < 0.0);
+        assert!(arrow_head(from, from, 50.0).is_none());
     }
 
     #[test]

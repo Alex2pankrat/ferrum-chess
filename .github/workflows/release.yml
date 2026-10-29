@@ -52,7 +52,7 @@ jobs:
       - name: Build MSI
         shell: pwsh
         run: |
-          wix build -arch x64 -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "RulesLicense=$pwd\assets\shakmaty-GPL.txt" wix/main.wxs -o release/ferrum-chess-x64.msi
+          wix build -arch x64 -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "RulesLicense=$pwd\assets\shakmaty-GPL.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" wix/main.wxs -o release/ferrum-chess-x64.msi
           if ($LASTEXITCODE -ne 0) { throw 'WiX build failed' }
       - name: Smoke-test MSI installation and engine
         shell: pwsh
@@ -63,6 +63,11 @@ jobs:
           if (!(Test-Path "$dir\ferrum-chess.exe") -or !(Test-Path "$dir\stockfish.exe")) { throw 'Installed files missing' }
           $reply = @('uci', 'isready', 'quit') | & "$dir\stockfish.exe"
           if (($reply -join "`n") -notmatch 'readyok') { throw 'Stockfish UCI smoke test failed' }
+          $app = Start-Process "$dir\ferrum-chess.exe" -PassThru
+          Start-Sleep -Seconds 5
+          $app.Refresh()
+          if ($app.HasExited) { throw "Installed app exited immediately: $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

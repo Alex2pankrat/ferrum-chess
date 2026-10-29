@@ -5,7 +5,7 @@ Ferrum Chess is an experimental, offline native chess application in Rust. It us
 ## Implemented
 
 - Play against Stockfish with selectable search depth, or choose analysis mode to play both sides and see an evaluation and best-move indicator. Engine calculations run on a worker thread.
-- Click a piece and its destination, drag from one square to another, or enter a UCI coordinate move such as `e2e4`. The board scales with the window and can be flipped independently of your side. Livius and Meridian SVG pieces, optional coordinates, legal destinations and the last move are displayed. Choose a promotion piece when a pawn reaches its last rank. A dragged piece follows the pointer.
+- Click a piece and its destination, drag from one square to another, or enter a UCI coordinate move such as `e2e4`. The board scales with the window and can be flipped independently of your side. Livius and Meridian SVG pieces, optional coordinates, legal destinations, checks, the last move and an engine hint arrow are displayed. Choose a promotion piece when a pawn reaches its last rank. A dragged piece follows the pointer.
 - Appearance settings include three board themes, two piece sets and coordinates; they are stored locally.
 - Step through and select earlier moves without changing the recorded game; return to the latest move to continue play.
 - New game, choose a side (starts a new game), restart, and undo. Undo normally takes back both a human move and the engine response in play mode, or one ply in analysis mode.
@@ -47,7 +47,7 @@ No `Cargo.lock` is checked in yet: create and commit one on a machine with regis
 - CI checks that the installer contains the expected dialogs and tests a silent install; it cannot prove that the interactive wizard is visible and usable on a user's Windows desktop. Manual testing of installation, Start menu launch, gameplay and removal remains necessary for each installer release.
 - Only standard chess is supported. `cozy-chess` detects checkmate, stalemate and the 50-move threshold, but this application does not track threefold repetition or insufficient-material draws. The engine receives the current FEN, not the history needed for repetition evaluation.
 - The PGN reader deliberately implements a subset, not the full PGN specification: UTF-8, one game, ordinary one-line tag pairs and canonical SAN. Other tags, comments, annotations and variations are not round-tripped. An imported declared result is retained until a move, undo, or restart.
-- The hint is a line and endpoint rather than an arrowhead. There are no clocks or online games. The redesigned UI and SVG pieces have not been manually visually tested on Windows; CI checks state transitions and installation but does not verify actual visual accessibility or all interactions.
+- There are no clocks or online games. The redesigned UI and SVG pieces have not been manually visually tested on Windows; CI checks state transitions and installation but does not verify actual visual accessibility or all interactions.
 - The UCI worker has deadlines and cancellation, but arbitrary external processes and OS I/O can still fail; only a trusted Stockfish binary should be used.
 
 ## Licenses

@@ -60,13 +60,11 @@ impl Session {
             .spawn()
             .map_err(|e| format!("Cannot start Stockfish ({}): {e}", path.display()))?;
         let Some(input) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate(&mut child);
             return Err("Stockfish stdin unavailable".into());
         };
         let Some(output) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate(&mut child);
             return Err("Stockfish stdout unavailable".into());
         };
         let (sender, receiver) = mpsc::sync_channel(256);
@@ -91,8 +89,7 @@ impl Session {
                 }
             });
         if let Err(e) = reader {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate(&mut child);
             return Err(format!("Cannot start UCI reader: {e}"));
         }
         Ok(Self {
@@ -136,12 +133,20 @@ impl Session {
     }
 }
 
+fn terminate(child: &mut Child) {
+    // Never wait indefinitely if the OS refuses the termination request.
+    if child.kill().is_ok() {
+        let _ = child.wait();
+    } else {
+        let _ = child.try_wait();
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         // Drop the receiver first so a reader blocked on a full channel can exit.
         self.lines.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        terminate(&mut self.child);
     }
 }
 

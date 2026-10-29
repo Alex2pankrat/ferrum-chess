@@ -63,10 +63,12 @@ impl Game {
         self.position.generate_moves_for(from.bitboard(), |moves| {
             for mv in moves {
                 let uci = display_uci_move(&self.position, mv).to_string();
-                if let Some(to) = uci.get(2..4).and_then(|s| s.parse().ok()) {
-                    if !targets.contains(&to) {
-                        targets.push(to);
-                    }
+                if let Some(to) = uci
+                    .get(2..4)
+                    .and_then(|s| s.parse().ok())
+                    .filter(|to| !targets.contains(to))
+                {
+                    targets.push(to);
                 }
             }
             false
@@ -172,6 +174,9 @@ impl Game {
     pub fn from_pgn(bytes: &[u8]) -> Result<Self, String> {
         let input = std::str::from_utf8(bytes).map_err(|e| format!("PGN must be UTF-8: {e}"))?;
         let input = input.trim_start_matches('\u{feff}');
+        if input.trim().is_empty() {
+            return Err("PGN contains no game".into());
+        }
         let mut game = Self::default();
         let mut fen = None;
         let mut tag_result = None;
@@ -239,10 +244,12 @@ impl Game {
                 .map_err(|_| format!("Invalid or illegal SAN: {token}"))?;
             game.apply(mv)?;
         }
-        if let (Some(tag), Some(text)) = (&tag_result, &movetext_result) {
-            if tag != text {
-                return Err("PGN result tag and movetext disagree".into());
-            }
+        if tag_result
+            .as_ref()
+            .zip(movetext_result.as_ref())
+            .is_some_and(|(tag, text)| tag != text)
+        {
+            return Err("PGN result tag and movetext disagree".into());
         }
         game.tags.result = movetext_result.or(tag_result).unwrap_or_else(|| "*".into());
         Ok(game)

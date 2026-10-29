@@ -217,10 +217,8 @@ impl App {
                 {
                     return Task::none();
                 }
-                if let Some(from) = self.selected {
-                    if from != square {
-                        return self.move_piece(from, square);
-                    }
+                if let Some(from) = self.selected.filter(|from| *from != square) {
+                    return self.move_piece(from, square);
                 }
                 self.selected = (self.game.position.color_on(square)
                     == Some(self.game.position.side_to_move()))
@@ -263,9 +261,7 @@ impl App {
                     self.game.undo();
                 }
                 self.notice = "Move undone".into();
-                if self.mode == Mode::Analysis {
-                    return self.maybe_search();
-                }
+                return self.maybe_search();
             }
             Message::Analyze => {
                 self.invalidate();
@@ -288,6 +284,8 @@ impl App {
                         {
                             if let Err(e) = self.game.play_uci(&analysis.best_move) {
                                 self.notice = e;
+                            } else if self.game.is_game_over() {
+                                self.notice = format!("Game over: {}", self.game.result());
                             }
                             self.analysis = None;
                         } else {
@@ -538,21 +536,22 @@ impl canvas::Program<Message> for Board<'_> {
                 }
             }
         }
-        if let Some(analysis) = &self.app.analysis {
-            if let (Some(from), Some(to)) = (
-                analysis.best_move.get(..2).and_then(|s| s.parse().ok()),
-                analysis.best_move.get(2..4).and_then(|s| s.parse().ok()),
-            ) {
-                let a = self.center(from);
-                let b = self.center(to);
-                frame.stroke(
-                    &Path::line(a, b),
-                    Stroke::default()
-                        .with_width(7.0)
-                        .with_color(Color::from_rgba8(242, 153, 45, 0.8)),
-                );
-                frame.fill(&Path::circle(b, 8.0), Color::from_rgb8(242, 153, 45));
-            }
+        let hint = self.app.analysis.as_ref().and_then(|analysis| {
+            Some((
+                analysis.best_move.get(..2)?.parse().ok()?,
+                analysis.best_move.get(2..4)?.parse().ok()?,
+            ))
+        });
+        if let Some((from, to)) = hint {
+            let a = self.center(from);
+            let b = self.center(to);
+            frame.stroke(
+                &Path::line(a, b),
+                Stroke::default()
+                    .with_width(7.0)
+                    .with_color(Color::from_rgba8(242, 153, 45, 0.8)),
+            );
+            frame.fill(&Path::circle(b, 8.0), Color::from_rgb8(242, 153, 45));
         }
         vec![frame.into_geometry()]
     }

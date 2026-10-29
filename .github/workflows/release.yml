@@ -62,7 +62,10 @@ jobs:
           $dist.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           dotnet tool install --global wix --version 4.0.5
           if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed' }
-          Join-Path $env:USERPROFILE '.dotnet\tools' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $wixTools = Join-Path $env:USERPROFILE '.dotnet\tools'
+          $wixTools | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $wixTools 'wix.exe') extension add --global WixToolset.UI.wixext/4.0.5
+          if ($LASTEXITCODE -ne 0) { throw 'WiX UI extension installation failed' }
       - name: Build Windows binary using cargo-dist
         shell: pwsh
         run: |
@@ -84,8 +87,38 @@ jobs:
       - name: Build MSI with WiX
         shell: pwsh
         run: |
-          wix build -arch x64 -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" wix/main.wxs -o release/ferrum-chess-x64.msi
+          # The wizard displays the complete MIT, Apache and Stockfish GPL notices.
+          $notice = @(
+            'Ferrum Chess is licensed under MIT OR Apache-2.0, at your option. Stockfish is a separate executable under GPL-3.0-or-later. Source: https://github.com/official-stockfish/Stockfish/tree/sf_17.1',
+            '--- MIT LICENSE ---', (Get-Content LICENSE-MIT -Raw),
+            '--- APACHE LICENSE ---', (Get-Content LICENSE-APACHE -Raw),
+            '--- STOCKFISH GPL LICENSE ---', (Get-Content stage/Stockfish-GPL.txt -Raw)
+          ) -join "`n`n"
+          $escaped = $notice.Replace('\', '\\').Replace('{', '\{').Replace('}', '\}').Replace("`r`n", "`n").Replace("`n", "\par`n")
+          $rtf = '{\rtf1\ansi\deff0 {\fonttbl{\f0 Arial;}}\f0\fs18 ' + $escaped + '}'
+          [IO.File]::WriteAllText("$pwd\stage\licenses.rtf", $rtf, [Text.Encoding]::ASCII)
+          wix build -arch x64 -ext WixToolset.UI.wixext -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" -d "LicenseRtf=$pwd\stage\licenses.rtf" wix/main.wxs -o release/ferrum-chess-x64.msi
           if ($LASTEXITCODE -ne 0) { throw 'WiX build failed' }
+      - name: Verify MSI wizard dialogs and UI sequence
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path release/ferrum-chess-x64.msi).Path
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.OpenDatabase($msi, 0)
+          foreach ($dialog in @('WelcomeEulaDlg', 'ProgressDlg', 'ExitDialog', 'FatalError')) {
+            $sql = 'SELECT `Dialog` FROM `Dialog` WHERE `Dialog` = ' + "'" + $dialog + "'"
+            $view = $db.OpenView($sql)
+            $view.Execute()
+            if (!$view.Fetch()) { throw "Missing MSI dialog: $dialog" }
+            $view.Close()
+          }
+          foreach ($action in @('WelcomeEulaDlg', 'ExitDialog')) {
+            $sql = 'SELECT `Action` FROM `InstallUISequence` WHERE `Action` = ' + "'" + $action + "'"
+            $view = $db.OpenView($sql)
+            $view.Execute()
+            if (!$view.Fetch()) { throw "Missing MSI UI action: $action" }
+            $view.Close()
+          }
       - name: Smoke-test install, engine and uninstall
         shell: pwsh
         run: |
@@ -94,6 +127,8 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "MSI install failed: $($p.ExitCode)" }
           $dir = "${env:ProgramFiles}\Ferrum Chess"
           if (!(Test-Path "$dir\ferrum-chess.exe") -or !(Test-Path "$dir\stockfish.exe")) { throw 'Installed files missing' }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Ferrum Chess\Ferrum Chess.lnk'
+          if (!(Test-Path $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
           $reply = @('uci', 'isready', 'quit') | & "$dir\stockfish.exe"
           if (($reply -join "`n") -notmatch 'readyok') { throw 'Installed Stockfish UCI smoke test failed' }
           $env:FERRUM_STOCKFISH = "$dir\stockfish.exe"

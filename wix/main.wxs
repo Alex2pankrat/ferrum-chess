@@ -20,9 +20,6 @@
         <Component Id="FontLicenseComponent" Guid="26EF830A-F91E-444F-A6E4-7F4E4544067F">
           <File Source="$(var.FontLicense)" Name="Noto-OFL.txt" KeyPath="yes" />
         </Component>
-        <Component Id="RulesLicenseComponent" Guid="12B201B0-AD43-4A15-AB06-C12D8F3B464E">
-          <File Source="$(var.RulesLicense)" Name="shakmaty-GPL.txt" KeyPath="yes" />
-        </Component>
         <Component Id="ReadmeComponent" Guid="69EBA1B2-65BB-4C55-829D-55A3AF627545">
           <File Source="$(var.Readme)" Name="README.txt" KeyPath="yes" />
         </Component>
@@ -38,7 +35,7 @@
       <Directory Id="ApplicationProgramsFolder" Name="Ferrum Chess" />
     </StandardDirectory>
     <Feature Id="Main" Title="Ferrum Chess" Level="1">
-      <ComponentRef Id="AppComponent" /><ComponentRef Id="EngineComponent" /><ComponentRef Id="LicenseComponent" /><ComponentRef Id="FontLicenseComponent" /><ComponentRef Id="RulesLicenseComponent" /><ComponentRef Id="ReadmeComponent" /><ComponentRef Id="MitComponent" /><ComponentRef Id="ApacheComponent" />
+      <ComponentRef Id="AppComponent" /><ComponentRef Id="EngineComponent" /><ComponentRef Id="LicenseComponent" /><ComponentRef Id="FontLicenseComponent" /><ComponentRef Id="ReadmeComponent" /><ComponentRef Id="MitComponent" /><ComponentRef Id="ApacheComponent" />
     </Feature>
   </Package>
 </Wix>

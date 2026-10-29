@@ -1,4 +1,5 @@
 //! Iced MVU application and interactive board.
+use cozy_chess::{Color as Side, Piece as Role, Square};
 use ferrum_chess::{
     engine::{self, Analysis},
     game::Game,
@@ -14,8 +15,13 @@ use iced::{
     },
     Color, Element, Length, Point, Rectangle, Renderer, Size, Task, Theme,
 };
-use cozy_chess::{Color as Side, Piece as Role, Square};
-use std::{fmt, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
@@ -137,9 +143,11 @@ fn worker<T: Send + 'static>(
     job: impl FnOnce() -> T + Send + 'static,
 ) -> impl std::future::Future<Output = Result<T, String>> {
     let (send, recv) = oneshot::channel();
-    let _ = std::thread::Builder::new().name("ferrum-worker".into()).spawn(move || {
-        let _ = send.send(job());
-    });
+    let _ = std::thread::Builder::new()
+        .name("ferrum-worker".into())
+        .spawn(move || {
+            let _ = send.send(job());
+        });
     async move {
         recv.await
             .map_err(|_| "Background task terminated unexpectedly".to_owned())
@@ -148,7 +156,9 @@ fn worker<T: Send + 'static>(
 
 impl App {
     fn invalidate(&mut self) {
-        if let Some(cancel) = self.search_cancel.take() { cancel.store(true, Ordering::Relaxed); }
+        if let Some(cancel) = self.search_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.generation = self.generation.wrapping_add(1);
         self.busy = false;
         self.analysis = None;
@@ -166,9 +176,10 @@ impl App {
         let depth = self.depth;
         let cancel = Arc::new(AtomicBool::new(false));
         self.search_cancel = Some(Arc::clone(&cancel));
-        Task::perform(worker(move || engine::analyze_with_cancel(fen, depth, cancel)), move |result| {
-            Message::Engine(generation, result.and_then(std::convert::identity))
-        })
+        Task::perform(
+            worker(move || engine::analyze_with_cancel(fen, depth, cancel)),
+            move |result| Message::Engine(generation, result.and_then(std::convert::identity)),
+        )
     }
     fn maybe_search(&mut self) -> Task<Message> {
         if self.mode == Mode::Analysis || self.game.position.side_to_move() != self.player.side() {
@@ -178,7 +189,8 @@ impl App {
         }
     }
     fn move_piece(&mut self, from: Square, to: Square) -> Task<Message> {
-        if self.busy || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
+        if self.busy
+            || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
         {
             return Task::none();
         }
@@ -189,7 +201,9 @@ impl App {
                 self.maybe_search()
             }
             Err(_) => {
-                self.selected = (self.game.position.color_on(to) == Some(self.game.position.side_to_move())).then_some(to);
+                self.selected = (self.game.position.color_on(to)
+                    == Some(self.game.position.side_to_move()))
+                .then_some(to);
                 Task::none()
             }
         }
@@ -198,7 +212,8 @@ impl App {
         match message {
             Message::Click(square) => {
                 if self.busy
-                    || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
+                    || (self.mode == Mode::Play
+                        && self.game.position.side_to_move() != self.player.side())
                 {
                     return Task::none();
                 }
@@ -207,7 +222,9 @@ impl App {
                         return self.move_piece(from, square);
                     }
                 }
-                self.selected = (self.game.position.color_on(square) == Some(self.game.position.side_to_move())).then_some(square);
+                self.selected = (self.game.position.color_on(square)
+                    == Some(self.game.position.side_to_move()))
+                .then_some(square);
             }
             Message::Drag(from, to) => return self.move_piece(from, to),
             Message::Mode(mode) => {
@@ -389,7 +406,9 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        if let Some(cancel) = self.search_cancel.take() { cancel.store(true, Ordering::Relaxed); }
+        if let Some(cancel) = self.search_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -488,7 +507,10 @@ impl canvas::Program<Message> for Board<'_> {
                         Color::from_rgba8(24, 46, 35, 0.45),
                     );
                 }
-                if let (Some(color), Some(piece)) = (self.app.game.position.color_on(square), self.app.game.position.piece_on(square)) {
+                if let (Some(color), Some(piece)) = (
+                    self.app.game.position.color_on(square),
+                    self.app.game.position.piece_on(square),
+                ) {
                     let glyph = match (color, piece) {
                         (Side::White, Role::King) => "♔",
                         (Side::White, Role::Queen) => "♕",

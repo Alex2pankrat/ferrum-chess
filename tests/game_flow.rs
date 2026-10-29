@@ -19,20 +19,36 @@ fn import_export_and_undo_main_line() {
 
 #[test]
 fn castling_en_passant_and_promotion_roundtrip() {
-    let mut game = Game::from_pgn(b"[FEN \"r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1\"]\n\n1. O-O O-O-O *").expect("valid castles");
+    let mut game =
+        Game::from_pgn(b"[FEN \"r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1\"]\n\n1. O-O O-O-O *")
+            .expect("valid castles");
     assert_eq!(game.position.piece_on(Square::G1), Some(Piece::King));
     assert_eq!(game.last_move(), Some((Square::E8, Square::C8)));
-    assert_eq!(Game::from_pgn(game.to_pgn().as_bytes()).expect("round trip").fen(), game.fen());
+    assert_eq!(
+        Game::from_pgn(game.to_pgn().as_bytes())
+            .expect("round trip")
+            .fen(),
+        game.fen()
+    );
     assert!(game.undo());
     assert!(game.undo());
     assert!(game.legal_targets(Square::E1).contains(&Square::G1));
-    game.play(Square::E1, Square::G1, Piece::Queen).expect("standard castle");
+    game.play(Square::E1, Square::G1, Piece::Queen)
+        .expect("standard castle");
     let ep = Game::from_pgn(b"1. e4 a6 2. e5 d5 3. exd6 *").expect("en passant");
     assert_eq!(ep.position.piece_on(Square::D5), None);
-    let mut promotion = Game::from_pgn(b"[FEN \"4k3/P7/8/8/8/8/8/4K3 w - - 0 1\"]\n\n*").expect("valid FEN");
-    promotion.play(Square::A7, Square::A8, Piece::Knight).expect("promote");
+    let mut promotion =
+        Game::from_pgn(b"[FEN \"4k3/P7/8/8/8/8/8/4K3 w - - 0 1\"]\n\n*").expect("valid FEN");
+    promotion
+        .play(Square::A7, Square::A8, Piece::Knight)
+        .expect("promote");
     assert_eq!(promotion.position.piece_on(Square::A8), Some(Piece::Knight));
-    assert_eq!(Game::from_pgn(promotion.to_pgn().as_bytes()).expect("promotion PGN").fen(), promotion.fen());
+    assert_eq!(
+        Game::from_pgn(promotion.to_pgn().as_bytes())
+            .expect("promotion PGN")
+            .fen(),
+        promotion.fen()
+    );
 }
 
 #[test]
@@ -45,10 +61,13 @@ fn rejects_invalid_moves_and_result_conflicts() {
 
 #[test]
 fn parses_comments_variations_and_escaped_tags() {
-    let game = Game::from_pgn(br#"[Event "A \"quoted\" event"]
+    let game = Game::from_pgn(
+        br#"[Event "A \"quoted\" event"]
 [Result "1-0"]
 
-1.e4 {comment} e5 (1... c5 (1... e6)) 2.Nf3 $1 Nc6 1-0"#).expect("PGN");
+1.e4 {comment} e5 (1... c5 (1... e6)) 2.Nf3 $1 Nc6 1-0"#,
+    )
+    .expect("PGN");
     assert_eq!(game.moves(), ["e4", "e5", "Nf3", "Nc6"]);
     assert_eq!(game.result(), "1-0");
     assert!(game.to_pgn().contains(r#"[Event "A \"quoted\" event"]"#));
@@ -56,9 +75,12 @@ fn parses_comments_variations_and_escaped_tags() {
 
 #[test]
 fn stockfish_returns_a_legal_move_when_configured() {
-    if std::env::var_os("FERRUM_STOCKFISH").is_none() { return; }
+    if std::env::var_os("FERRUM_STOCKFISH").is_none() {
+        return;
+    }
     let mut game = Game::default();
     game.play_uci("e2e4").expect("opening move");
     let analysis = ferrum_chess::engine::analyze(game.fen(), 4).expect("engine search");
-    game.play_uci(&analysis.best_move).expect("engine must return a legal move");
+    game.play_uci(&analysis.best_move)
+        .expect("engine must return a legal move");
 }

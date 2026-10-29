@@ -1,4 +1,5 @@
 //! Iced MVU application and interactive board.
+use crate::preferences::{BoardTheme, PieceSet, Preferences};
 use cozy_chess::{Color as Side, Piece as Role, Square};
 use ferrum_chess::{
     engine::{self, Analysis},
@@ -10,7 +11,7 @@ use iced::{
     widget::{
         button,
         canvas::{self, Canvas, Frame, Geometry, Path, Stroke},
-        column, container, pick_list, responsive, row, scrollable, svg, text,
+        checkbox, column, container, pick_list, responsive, row, scrollable, svg, text, text_input,
     },
     Color, Element, Length, Point, Rectangle, Renderer, Size, Task, Theme,
 };
@@ -36,7 +37,11 @@ pub fn run() -> iced::Result {
                 danger: Color::from_rgb8(202, 100, 96),
             },
         ))
-        .window_size(Size::new(1200.0, 800.0))
+        .window(iced::window::Settings {
+            size: Size::new(1200.0, 800.0),
+            min_size: Some(Size::new(520.0, 500.0)),
+            ..iced::window::Settings::default()
+        })
         .run()
 }
 
@@ -103,7 +108,10 @@ struct App {
     mode: Mode,
     player: Player,
     flipped: bool,
-    promotion: Promotion,
+    preferences: Preferences,
+    settings_open: bool,
+    pending_promotion: Option<(Square, Square)>,
+    move_input: String,
     depth: u32,
     selected: Option<Square>,
     analysis: Option<Analysis>,
@@ -119,7 +127,10 @@ impl Default for App {
             mode: Mode::Play,
             player: Player::White,
             flipped: false,
-            promotion: Promotion::Queen,
+            preferences: Preferences::load(),
+            settings_open: false,
+            pending_promotion: None,
+            move_input: String::new(),
             depth: 10,
             selected: None,
             analysis: None,
@@ -137,7 +148,14 @@ enum Message {
     Mode(Mode),
     Player(Player),
     Depth(u32),
-    Promotion(Promotion),
+    Promote(Promotion),
+    CancelPromotion,
+    Appearance(bool),
+    BoardTheme(BoardTheme),
+    PieceSet(PieceSet),
+    Coordinates(bool),
+    MoveTextChanged(String),
+    SubmitMove,
     Flip,
     New,
     Reset,
@@ -174,6 +192,7 @@ impl App {
         self.busy = false;
         self.analysis = None;
         self.selected = None;
+        self.pending_promotion = None;
     }
     fn search(&mut self) -> Task<Message> {
         if self.game.is_game_over() {
@@ -201,11 +220,24 @@ impl App {
     }
     fn move_piece(&mut self, from: Square, to: Square) -> Task<Message> {
         if self.busy
+            || self.pending_promotion.is_some()
             || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
         {
             return Task::none();
         }
-        match self.game.play(from, to, self.promotion.role()) {
+        let promotes = self.game.position.piece_on(from) == Some(Role::Pawn)
+            && (to.to_string().ends_with('8') || to.to_string().ends_with('1'))
+            && self.game.legal_targets(from).contains(&to);
+        if promotes {
+            self.pending_promotion = Some((from, to));
+            self.settings_open = false;
+            self.notice = "Choose a piece for your pawn".into();
+            return Task::none();
+        }
+        self.finish_move(from, to, Role::Queen)
+    }
+    fn finish_move(&mut self, from: Square, to: Square, promotion: Role) -> Task<Message> {
+        match self.game.play(from, to, promotion) {
             Ok(()) => {
                 self.invalidate();
                 self.notice = format!("{:?} to move", self.game.position.side_to_move());
@@ -219,10 +251,16 @@ impl App {
             }
         }
     }
+    fn save_preferences(&mut self) {
+        if let Err(error) = self.preferences.save() {
+            self.notice = error;
+        }
+    }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Click(square) => {
                 if self.busy
+                    || self.pending_promotion.is_some()
                     || (self.mode == Mode::Play
                         && self.game.position.side_to_move() != self.player.side())
                 {
@@ -238,6 +276,7 @@ impl App {
             Message::Drag(from, to) => return self.move_piece(from, to),
             Message::Mode(mode) => {
                 self.mode = mode;
+                self.settings_open = false;
                 self.invalidate();
                 return self.maybe_search();
             }
@@ -253,7 +292,69 @@ impl App {
                 self.invalidate();
                 return self.maybe_search();
             }
-            Message::Promotion(p) => self.promotion = p,
+            Message::Promote(p) => {
+                if let Some((from, to)) = self.pending_promotion.take() {
+                    return self.finish_move(from, to, p.role());
+                }
+            }
+            Message::CancelPromotion => {
+                self.pending_promotion = None;
+                self.notice = "Promotion cancelled".into();
+            }
+            Message::Appearance(open) => self.settings_open = open,
+            Message::BoardTheme(theme) => {
+                self.preferences.board = theme;
+                self.save_preferences();
+            }
+            Message::PieceSet(set) => {
+                self.preferences.pieces = set;
+                self.save_preferences();
+            }
+            Message::Coordinates(value) => {
+                self.preferences.coordinates = value;
+                self.save_preferences();
+            }
+            Message::MoveTextChanged(value) => self.move_input = value,
+            Message::SubmitMove => {
+                if self.busy
+                    || self.pending_promotion.is_some()
+                    || self.game.is_game_over()
+                    || (self.mode == Mode::Play
+                        && self.game.position.side_to_move() != self.player.side())
+                {
+                    self.notice = "Cannot move right now".into();
+                    return Task::none();
+                }
+                let input = self.move_input.trim().to_ascii_lowercase();
+                if !input.is_ascii() || !(input.len() == 4 || input.len() == 5) {
+                    self.notice = "Enter a move like e2e4 or e7e8q".into();
+                    return Task::none();
+                }
+                let from = input.get(..2).and_then(|v| v.parse::<Square>().ok());
+                let to = input.get(2..4).and_then(|v| v.parse::<Square>().ok());
+                if let (Some(from), Some(to)) = (from, to) {
+                    if input.len() == 4 && self.game.legal_targets(from).contains(&to) {
+                        self.move_input.clear();
+                        return self.move_piece(from, to);
+                    }
+                    if input.len() == 5 {
+                        match self.game.play_uci(&input) {
+                            Ok(()) => {
+                                self.move_input.clear();
+                                self.invalidate();
+                                self.notice =
+                                    format!("{:?} to move", self.game.position.side_to_move());
+                                return self.maybe_search();
+                            }
+                            Err(error) => self.notice = error,
+                        }
+                    } else {
+                        self.notice = "Illegal move".into();
+                    }
+                } else {
+                    self.notice = "Enter a move like e2e4 or e7e8q".into();
+                }
+            }
             Message::Flip => self.flipped = !self.flipped,
             Message::New => {
                 self.game = Game::default();
@@ -403,6 +504,14 @@ impl App {
                     button::secondary
                 })
                 .padding([9, 18]),
+            button("Appearance")
+                .on_press(Message::Appearance(!self.settings_open))
+                .style(if self.settings_open {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .padding([9, 14]),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -410,6 +519,51 @@ impl App {
         let board = Canvas::new(Board { app: self })
             .width(board_size)
             .height(board_size);
+        let board: Element<'_, Message> = if self.pending_promotion.is_some() {
+            let side = self.game.position.side_to_move();
+            let choice = |label, kind: Promotion| {
+                button(
+                    column![
+                        svg::Svg::new(
+                            piece_handle(self.preferences.pieces, side, kind.role()).clone()
+                        )
+                        .width(42)
+                        .height(42),
+                        text(label).size(12),
+                    ]
+                    .align_x(iced::Alignment::Center)
+                    .spacing(3),
+                )
+                .style(button::secondary)
+                .padding(6)
+                .on_press(Message::Promote(kind))
+            };
+            let dialog = container(
+                column![
+                    text("CHOOSE PROMOTION").size(13).color(accent()),
+                    row![
+                        choice("Queen", Promotion::Queen),
+                        choice("Rook", Promotion::Rook),
+                        choice("Bishop", Promotion::Bishop),
+                        choice("Knight", Promotion::Knight)
+                    ]
+                    .spacing(4),
+                    button("Cancel")
+                        .on_press(Message::CancelPromotion)
+                        .style(button::text),
+                ]
+                .spacing(10),
+            )
+            .padding(16)
+            .style(card_style);
+            iced::widget::stack![
+                board,
+                container(dialog).center_x(board_size).center_y(board_size)
+            ]
+            .into()
+        } else {
+            board.into()
+        };
         let opponent = if self.flipped { "White" } else { "Black" };
         let bottom = if self.flipped { "Black" } else { "White" };
         let board_area = column![
@@ -492,106 +646,139 @@ impl App {
         } else {
             "READY"
         };
-        let panel = column![
-            text(heading).size(24),
-            text(mode_description).size(13).color(muted()),
-            container(
-                column![
-                    text(status).size(11).color(accent()),
-                    text(&self.notice).size(14),
-                ]
-                .spacing(6)
-            )
-            .padding(14)
-            .width(Length::Fill)
-            .style(card_style),
-            row![
-                button("New game").on_press(Message::New).padding([9, 12]),
-                button("Undo")
-                    .on_press(Message::Undo)
-                    .style(button::secondary)
-                    .padding([9, 12]),
-                button("Flip board")
-                    .on_press(Message::Flip)
-                    .style(button::secondary)
-                    .padding([9, 12]),
-            ]
-            .spacing(6),
-            text("GAME SETTINGS").size(11).color(muted()),
-            row![
-                column![
-                    text("Play as").size(12).color(muted()),
-                    pick_list(
-                        [Player::White, Player::Black],
-                        Some(self.player),
-                        Message::Player
-                    )
-                    .width(Length::Fill)
-                ]
-                .spacing(5)
-                .width(Length::Fill),
-                column![
-                    text("Engine depth").size(12).color(muted()),
-                    pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth)
-                        .width(Length::Fill)
-                ]
-                .spacing(5)
-                .width(Length::Fill),
-            ]
-            .spacing(10),
-            row![
-                column![
-                    text("Pawn promotion").size(12).color(muted()),
-                    pick_list(
-                        [
-                            Promotion::Queen,
-                            Promotion::Rook,
-                            Promotion::Bishop,
-                            Promotion::Knight
-                        ],
-                        Some(self.promotion),
-                        Message::Promotion
-                    )
-                    .width(Length::Fill)
-                ]
-                .spacing(5)
-                .width(Length::Fill),
-                button("Restart")
-                    .on_press(Message::Reset)
-                    .style(button::secondary)
-                    .padding([9, 12]),
-            ]
-            .spacing(10)
-            .align_y(iced::Alignment::End),
-            row![
-                text("MOVES").size(11).color(muted()).width(Length::Fill),
-                text(format!("{} plies", moves.len()))
-                    .size(11)
-                    .color(muted())
-            ]
-            .align_y(iced::Alignment::Center),
-            container(scrollable(text(move_text).size(15)).height(110))
-                .padding(12)
+        let panel: Element<'_, Message> = if self.settings_open {
+            column![
+                text("Appearance").size(24),
+                text("Make the board your own").size(13).color(muted()),
+                container(
+                    column![
+                        text("BOARD THEME").size(11).color(muted()),
+                        pick_list(
+                            [BoardTheme::Forest, BoardTheme::Walnut, BoardTheme::Slate],
+                            Some(self.preferences.board),
+                            Message::BoardTheme
+                        )
+                        .width(Length::Fill),
+                        text("PIECE SET").size(11).color(muted()),
+                        pick_list(
+                            [PieceSet::Livius, PieceSet::Meridian],
+                            Some(self.preferences.pieces),
+                            Message::PieceSet
+                        )
+                        .width(Length::Fill),
+                        checkbox(self.preferences.coordinates)
+                            .label("Show board coordinates")
+                            .on_toggle(Message::Coordinates),
+                    ]
+                    .spacing(12)
+                )
+                .padding(18)
                 .width(Length::Fill)
                 .style(card_style),
-            row![
-                button("Open PGN")
-                    .on_press(Message::Open)
-                    .style(button::secondary)
-                    .padding([9, 12]),
-                button("Save PGN")
-                    .on_press(Message::Save)
-                    .style(button::secondary)
-                    .padding([9, 12]),
-                button("Analyze")
-                    .on_press(Message::Analyze)
-                    .style(button::secondary)
+                text("Settings are stored on this device.")
+                    .size(12)
+                    .color(muted()),
+                button("Back to game")
+                    .on_press(Message::Appearance(false))
                     .padding([9, 12]),
             ]
-            .spacing(6),
-        ]
-        .spacing(10)
-        .width(Length::Fill);
+            .spacing(14)
+            .width(Length::Fill)
+            .into()
+        } else {
+            column![
+                text(heading).size(24),
+                text(mode_description).size(13).color(muted()),
+                container(
+                    column![
+                        text(status).size(11).color(accent()),
+                        text(&self.notice).size(14)
+                    ]
+                    .spacing(6)
+                )
+                .padding(14)
+                .width(Length::Fill)
+                .style(card_style),
+                row![
+                    button("New game").on_press(Message::New).padding([9, 12]),
+                    button("Undo")
+                        .on_press(Message::Undo)
+                        .style(button::secondary)
+                        .padding([9, 12]),
+                    button("Flip board")
+                        .on_press(Message::Flip)
+                        .style(button::secondary)
+                        .padding([9, 12]),
+                ]
+                .spacing(6),
+                text("ENTER A MOVE").size(11).color(muted()),
+                row![
+                    text_input("e2e4", &self.move_input)
+                        .on_input(Message::MoveTextChanged)
+                        .on_submit(Message::SubmitMove)
+                        .width(Length::Fill),
+                    button("Move")
+                        .on_press(Message::SubmitMove)
+                        .style(button::secondary)
+                        .padding([9, 12])
+                ]
+                .spacing(8),
+                text("GAME SETTINGS").size(11).color(muted()),
+                row![
+                    column![
+                        text("Play as").size(12).color(muted()),
+                        pick_list(
+                            [Player::White, Player::Black],
+                            Some(self.player),
+                            Message::Player
+                        )
+                        .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
+                    column![
+                        text("Engine depth").size(12).color(muted()),
+                        pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(5)
+                    .width(Length::Fill),
+                ]
+                .spacing(10),
+                row![
+                    text("MOVES").size(11).color(muted()).width(Length::Fill),
+                    text(format!("{} plies", moves.len()))
+                        .size(11)
+                        .color(muted())
+                ]
+                .align_y(iced::Alignment::Center),
+                container(scrollable(text(move_text).size(15)).height(110))
+                    .padding(12)
+                    .width(Length::Fill)
+                    .style(card_style),
+                row![
+                    button("Open PGN")
+                        .on_press(Message::Open)
+                        .style(button::secondary)
+                        .padding([9, 12]),
+                    button("Save PGN")
+                        .on_press(Message::Save)
+                        .style(button::secondary)
+                        .padding([9, 12]),
+                    button("Analyze")
+                        .on_press(Message::Analyze)
+                        .style(button::secondary)
+                        .padding([9, 12]),
+                ]
+                .spacing(6),
+                button("Restart position")
+                    .on_press(Message::Reset)
+                    .style(button::text),
+            ]
+            .spacing(10)
+            .width(Length::Fill)
+            .into()
+        };
         let content: Element<'_, Message> = if compact {
             scrollable(column![board_area, panel].spacing(24))
                 .height(Length::Fill)
@@ -623,6 +810,17 @@ fn muted() -> Color {
     Color::from_rgb8(149, 160, 154)
 }
 
+fn board_color(theme: BoardTheme, light: bool) -> Color {
+    match (theme, light) {
+        (BoardTheme::Forest, true) => Color::from_rgb8(232, 231, 210),
+        (BoardTheme::Forest, false) => Color::from_rgb8(113, 145, 119),
+        (BoardTheme::Walnut, true) => Color::from_rgb8(237, 218, 187),
+        (BoardTheme::Walnut, false) => Color::from_rgb8(151, 104, 75),
+        (BoardTheme::Slate, true) => Color::from_rgb8(218, 226, 226),
+        (BoardTheme::Slate, false) => Color::from_rgb8(103, 125, 137),
+    }
+}
+
 fn accent() -> Color {
     Color::from_rgb8(160, 195, 137)
 }
@@ -636,8 +834,8 @@ fn card_style(_theme: &Theme) -> container::Style {
 }
 
 // Handles are reused between frames so the renderer can cache the SVG data.
-fn piece_handle(color: Side, piece: Role) -> &'static svg::Handle {
-    static PIECES: OnceLock<[svg::Handle; 12]> = OnceLock::new();
+fn piece_handle(set: PieceSet, color: Side, piece: Role) -> &'static svg::Handle {
+    static PIECES: OnceLock<[svg::Handle; 24]> = OnceLock::new();
     let pieces = PIECES.get_or_init(|| {
         [
             include_bytes!("../assets/pieces/livius/wk.svg").as_slice(),
@@ -652,6 +850,18 @@ fn piece_handle(color: Side, piece: Role) -> &'static svg::Handle {
             include_bytes!("../assets/pieces/livius/bb.svg").as_slice(),
             include_bytes!("../assets/pieces/livius/bn.svg").as_slice(),
             include_bytes!("../assets/pieces/livius/bp.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/wk.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/wq.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/wr.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/wb.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/wn.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/wp.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/bk.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/bq.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/br.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/bb.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/bn.svg").as_slice(),
+            include_bytes!("../assets/pieces/meridian/bp.svg").as_slice(),
         ]
         .map(svg::Handle::from_memory)
     });
@@ -664,7 +874,14 @@ fn piece_handle(color: Side, piece: Role) -> &'static svg::Handle {
         Role::Knight => 4,
         Role::Pawn => 5,
     };
-    &pieces[offset + index]
+    let set_offset = if set == PieceSet::Livius { 0 } else { 12 };
+    &pieces[set_offset + offset + index]
+}
+
+#[derive(Default)]
+struct BoardState {
+    pressed: Option<(Square, Point)>,
+    dragging: bool,
 }
 
 struct Board<'a> {
@@ -699,7 +916,7 @@ impl Board<'_> {
     }
 }
 impl canvas::Program<Message> for Board<'_> {
-    type State = Option<Square>;
+    type State = BoardState;
     fn update(
         &self,
         state: &mut Self::State,
@@ -710,33 +927,68 @@ impl canvas::Program<Message> for Board<'_> {
         let size = bounds.width.min(bounds.height);
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let sq = self.square(cursor.position_in(bounds)?, size)?;
-                *state = Some(sq);
+                let position = cursor.position_in(bounds)?;
+                let sq = self.square(position, size)?;
+                state.pressed = Some((sq, position));
+                state.dragging = false;
                 Some(canvas::Action::publish(Message::Click(sq)).and_capture())
             }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                let from = state.take()?;
-                let to = self.square(cursor.position_in(bounds)?, size)?;
-                if from != to {
-                    Some(canvas::Action::publish(Message::Drag(from, to)).and_capture())
-                } else {
-                    None
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let (Some((_, origin)), Some(position)) =
+                    (state.pressed, cursor.position_from(bounds.position()))
+                {
+                    let dx = position.x - origin.x;
+                    let dy = position.y - origin.y;
+                    if dx * dx + dy * dy > 25.0 {
+                        state.dragging = true;
+                    }
+                    return Some(canvas::Action::request_redraw());
                 }
+                None
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let (from, _) = state.pressed.take()?;
+                state.dragging = false;
+                if let Some(to) = cursor
+                    .position_in(bounds)
+                    .and_then(|p| self.square(p, size))
+                {
+                    if from != to {
+                        return Some(
+                            canvas::Action::publish(Message::Drag(from, to)).and_capture(),
+                        );
+                    }
+                }
+                Some(canvas::Action::request_redraw())
+            }
+            canvas::Event::Mouse(mouse::Event::CursorLeft) => {
+                state.pressed = None;
+                state.dragging = false;
+                Some(canvas::Action::request_redraw())
             }
             _ => None,
         }
     }
+
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let size = bounds.width.min(bounds.height);
         let cell = size / 8.0;
+        let dragged = state.pressed.and_then(|(square, _)| {
+            (state.dragging
+                && self.app.selected == Some(square)
+                && !self.app.busy
+                && self.app.pending_promotion.is_none())
+            .then(|| cursor.position_from(bounds.position()).map(|p| (square, p)))
+            .flatten()
+        });
         let targets = self
             .app
             .selected
@@ -762,10 +1014,8 @@ impl canvas::Program<Message> for Board<'_> {
                     } else {
                         Color::from_rgb8(163, 179, 105)
                     }
-                } else if light {
-                    Color::from_rgb8(232, 231, 210)
                 } else {
-                    Color::from_rgb8(113, 145, 119)
+                    board_color(self.app.preferences.board, light)
                 };
                 frame.fill_rectangle(top_left, Size::new(cell, cell), color);
                 if targets.contains(&square) {
@@ -777,19 +1027,21 @@ impl canvas::Program<Message> for Board<'_> {
                         Color::from_rgba8(24, 46, 35, 0.35),
                     );
                 }
-                if let (Some(color), Some(piece)) = (
-                    self.app.game.position.color_on(square),
-                    self.app.game.position.piece_on(square),
-                ) {
-                    frame.draw_svg(
-                        Rectangle {
-                            x: top_left.x + cell * 0.025,
-                            y: top_left.y + cell * 0.025,
-                            width: cell * 0.95,
-                            height: cell * 0.95,
-                        },
-                        piece_handle(color, piece),
-                    );
+                if dragged.is_none_or(|(dragged_square, _)| dragged_square != square) {
+                    if let (Some(color), Some(piece)) = (
+                        self.app.game.position.color_on(square),
+                        self.app.game.position.piece_on(square),
+                    ) {
+                        frame.draw_svg(
+                            Rectangle {
+                                x: top_left.x + cell * 0.025,
+                                y: top_left.y + cell * 0.025,
+                                width: cell * 0.95,
+                                height: cell * 0.95,
+                            },
+                            piece_handle(self.app.preferences.pieces, color, piece),
+                        );
+                    }
                 }
                 let name = square.to_string();
                 let label_color = if light {
@@ -797,7 +1049,7 @@ impl canvas::Program<Message> for Board<'_> {
                 } else {
                     Color::from_rgb8(226, 230, 208)
                 };
-                if x == 0 {
+                if self.app.preferences.coordinates && x == 0 {
                     frame.fill_text(canvas::Text {
                         content: name[1..2].into(),
                         position: Point::new(top_left.x + cell * 0.06, top_left.y + cell * 0.04),
@@ -806,7 +1058,7 @@ impl canvas::Program<Message> for Board<'_> {
                         ..canvas::Text::default()
                     });
                 }
-                if y == 7 {
+                if self.app.preferences.coordinates && y == 7 {
                     frame.fill_text(canvas::Text {
                         content: name[..1].into(),
                         position: Point::new(top_left.x + cell * 0.82, top_left.y + cell * 0.79),
@@ -815,6 +1067,22 @@ impl canvas::Program<Message> for Board<'_> {
                         ..canvas::Text::default()
                     });
                 }
+            }
+        }
+        if let Some((square, position)) = dragged {
+            if let (Some(color), Some(piece)) = (
+                self.app.game.position.color_on(square),
+                self.app.game.position.piece_on(square),
+            ) {
+                frame.draw_svg(
+                    Rectangle {
+                        x: position.x - cell * 0.475,
+                        y: position.y - cell * 0.475,
+                        width: cell * 0.95,
+                        height: cell * 0.95,
+                    },
+                    piece_handle(self.app.preferences.pieces, color, piece),
+                );
             }
         }
         let hint = self.app.analysis.as_ref().and_then(|analysis| {
@@ -900,12 +1168,84 @@ mod tests {
                 Role::Knight,
                 Role::Pawn,
             ] {
-                ids.push(piece_handle(color, piece).id());
+                ids.push(piece_handle(PieceSet::Livius, color, piece).id());
+                ids.push(piece_handle(PieceSet::Meridian, color, piece).id());
             }
         }
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 12);
+        assert_eq!(ids.len(), 24);
+    }
+
+    #[test]
+    fn promotion_waits_for_choice_and_supports_underpromotion() {
+        let mut app = App::default();
+        app.game = Game::from_pgn(b"[FEN \"7k/P7/5K2/8/8/8/8/8 w - - 0 1\"]\n\n*").unwrap();
+        let before = app.game.fen();
+        let _ = app.update(Message::Drag(Square::A7, Square::A8));
+        assert_eq!(app.pending_promotion, Some((Square::A7, Square::A8)));
+        assert_eq!(app.game.fen(), before);
+        let _ = app.update(Message::Click(Square::F6));
+        assert_eq!(app.game.fen(), before);
+        let _ = app.update(Message::CancelPromotion);
+        assert_eq!(app.pending_promotion, None);
+        let _ = app.update(Message::Drag(Square::A7, Square::A8));
+        let _ = app.update(Message::Promote(Promotion::Knight));
+        assert_eq!(app.game.position.piece_on(Square::A8), Some(Role::Knight));
+        assert_eq!(app.pending_promotion, None);
+    }
+
+    #[test]
+    fn text_move_validates_and_plays() {
+        let mut app = App::default();
+        let _ = app.update(Message::MoveTextChanged("bad".into()));
+        let _ = app.update(Message::SubmitMove);
+        assert_eq!(app.game.fen(), Game::default().fen());
+        assert!(app.notice.contains("Enter a move"));
+        let _ = app.update(Message::MoveTextChanged("e2e4".into()));
+        let _ = app.update(Message::SubmitMove);
+        assert_eq!(app.game.moves(), ["e4"]);
+        assert!(app.move_input.is_empty());
+        assert!(app.busy);
+    }
+
+    #[test]
+    fn canvas_drag_emits_click_and_drag_at_scaled_coordinates() {
+        use iced::widget::canvas::Program;
+        let app = App::default();
+        let board = Board { app: &app };
+        let mut state = BoardState::default();
+        let bounds = Rectangle {
+            x: 10.0,
+            y: 20.0,
+            width: 400.0,
+            height: 400.0,
+        };
+        let from = board.center(Square::E2, 400.0);
+        let to = board.center(Square::E4, 400.0);
+        let cursor =
+            |p: Point| mouse::Cursor::Available(Point::new(p.x + bounds.x, p.y + bounds.y));
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let action = board
+            .update(&mut state, &press, bounds, cursor(from))
+            .unwrap();
+        assert!(matches!(
+            action.into_inner().0,
+            Some(Message::Click(Square::E2))
+        ));
+        let motion = canvas::Event::Mouse(mouse::Event::CursorMoved { position: to });
+        let _ = board.update(&mut state, &motion, bounds, cursor(to));
+        assert!(state.dragging);
+        let release = canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        let action = board
+            .update(&mut state, &release, bounds, cursor(to))
+            .unwrap();
+        assert!(matches!(
+            action.into_inner().0,
+            Some(Message::Drag(Square::E2, Square::E4))
+        ));
+        assert!(!state.dragging);
+        assert!(state.pressed.is_none());
     }
 
     #[test]

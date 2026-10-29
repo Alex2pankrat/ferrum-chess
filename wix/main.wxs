@@ -25,8 +25,8 @@
         <Component Id="FontLicenseComponent" Guid="26EF830A-F91E-444F-A6E4-7F4E4544067F">
           <File Source="$(var.FontLicense)" Name="Noto-OFL.txt" KeyPath="yes" />
         </Component>
-        <Component Id="PieceNoticeComponent" Guid="145D2EE1-C05A-416A-8338-6020A32CE11D">
-          <File Source="$(var.PieceNotice)" Name="Livius-Public-Domain.txt" KeyPath="yes" />
+        <Component Id="PieceNoticeComponent" Guid="B08F048B-0A07-46E4-861E-557D77F1F40E">
+          <File Source="$(var.PieceNotice)" Name="Chess-Pieces-Public-Domain.txt" KeyPath="yes" />
         </Component>
         <Component Id="ReadmeComponent" Guid="69EBA1B2-65BB-4C55-829D-55A3AF627545">
           <File Source="$(var.Readme)" Name="README.txt" KeyPath="yes" />

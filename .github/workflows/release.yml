@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, assets/OFL.txt stage/
-          Copy-Item assets/pieces/livius/LICENSE stage/Livius-Public-Domain.txt
+          Copy-Item assets/pieces/livius/LICENSE stage/Chess-Pieces-Public-Domain.txt
           Copy-Item stage/ferrum-chess.exe release/ferrum-chess.exe
           Copy-Item stage/stockfish.exe release/stockfish.exe
           Compress-Archive -Path stage/* -DestinationPath release/ferrum-chess-windows-portable.zip
@@ -106,7 +106,7 @@ jobs:
               }
             } finally { $zip.Dispose() }
           }
-          Assert-ZipEntries 'release/ferrum-chess-windows-portable.zip' @('(^|/)ferrum-chess\.exe$', '(^|/)stockfish\.exe$', '(^|/)Stockfish-GPL\.txt$', '(^|/)LICENSE-MIT$', '(^|/)LICENSE-APACHE$', '(^|/)OFL\.txt$', '(^|/)Livius-Public-Domain\.txt$')
+          Assert-ZipEntries 'release/ferrum-chess-windows-portable.zip' @('(^|/)ferrum-chess\.exe$', '(^|/)stockfish\.exe$', '(^|/)Stockfish-GPL\.txt$', '(^|/)LICENSE-MIT$', '(^|/)LICENSE-APACHE$', '(^|/)OFL\.txt$', '(^|/)Chess-Pieces-Public-Domain\.txt$')
           Assert-ZipEntries 'release/stockfish-17.1-source.zip' @('(^|/)src/uci\.cpp$', '(^|/)Copying\.txt$')
           Assert-ZipEntries 'release/stockfish-17.1-official.zip' @('(^|/)src/uci\.cpp$', '(^|/)Copying\.txt$')
       - name: Build MSI with WiX
@@ -122,7 +122,7 @@ jobs:
           $escaped = $notice.Replace('\', '\\').Replace('{', '\{').Replace('}', '\}').Replace("`r`n", "`n").Replace("`n", "\par`n")
           $rtf = '{\rtf1\ansi\deff0 {\fonttbl{\f0 Arial;}}\f0\fs18 ' + $escaped + '}'
           [IO.File]::WriteAllText("$pwd\stage\licenses.rtf", $rtf, [Text.Encoding]::ASCII)
-          wix build -arch x64 -ext WixToolset.UI.wixext -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "PieceNotice=$pwd\stage\Livius-Public-Domain.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" -d "LicenseRtf=$pwd\stage\licenses.rtf" wix/main.wxs -o release/ferrum-chess-x64.msi
+          wix build -arch x64 -ext WixToolset.UI.wixext -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "PieceNotice=$pwd\stage\Chess-Pieces-Public-Domain.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" -d "LicenseRtf=$pwd\stage\licenses.rtf" wix/main.wxs -o release/ferrum-chess-x64.msi
           if ($LASTEXITCODE -ne 0) { throw 'WiX build failed' }
       - name: Verify MSI wizard dialogs and UI sequence
         shell: pwsh
@@ -147,9 +147,16 @@ jobs:
       - name: Smoke-test install, engine and uninstall
         shell: pwsh
         run: |
+          # Verify that the new installer upgrades the previously published 0.1.0 MSI.
+          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.1.0/ferrum-chess-x64.msi' -OutFile old-version.msi
+          $oldMsi = (Resolve-Path old-version.msi).Path
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$oldMsi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Previous MSI install failed: $($p.ExitCode)" }
           $msi = (Resolve-Path release/ferrum-chess-x64.msi).Path
           $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "MSI install failed: $($p.ExitCode)" }
+          $installed = @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'Ferrum Chess')
+          if ($installed.Count -ne 1 -or $installed[0].DisplayVersion -ne $env:VERSION) { throw 'MSI upgrade did not replace the previous version' }
           $dir = "${env:ProgramFiles}\Ferrum Chess"
           if (!(Test-Path "$dir\ferrum-chess.exe") -or !(Test-Path "$dir\stockfish.exe")) { throw 'Installed files missing' }
           $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Ferrum Chess\Ferrum Chess.lnk'
@@ -162,7 +169,7 @@ jobs:
           Remove-Item Env:FERRUM_STOCKFISH -ErrorAction SilentlyContinue
           & "$dir\ferrum-chess.exe" --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Installed app self-test with adjacent Stockfish failed' }
-          foreach ($file in @('LICENSE-MIT.txt', 'LICENSE-APACHE.txt', 'Stockfish-GPL.txt', 'Noto-OFL.txt', 'Livius-Public-Domain.txt')) {
+          foreach ($file in @('LICENSE-MIT.txt', 'LICENSE-APACHE.txt', 'Stockfish-GPL.txt', 'Noto-OFL.txt', 'Chess-Pieces-Public-Domain.txt')) {
             if (!(Test-Path (Join-Path $dir $file))) { throw "Installed license missing: $file" }
           }
           $app = Start-Process "$dir\ferrum-chess.exe" -PassThru

@@ -1,0 +1,10 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.33.1"
+ci = "github"
+targets = ["x86_64-pc-windows-msvc"]
+installers = []
+hosting = "github"
+allow-dirty = ["ci"]

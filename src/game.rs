@@ -218,7 +218,7 @@ mod rules_tests {
 
     #[test]
     fn invalid_pgn_is_rejected() {
-        assert!(Game::from_pgn(b"1. e4 e5 2. Qh9 *").is_err());
+        assert!(Game::from_pgn(b"1. e4 e5 2. Ke7 *").is_err());
     }
 
     #[test]

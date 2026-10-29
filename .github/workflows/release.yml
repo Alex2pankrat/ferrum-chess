@@ -1,0 +1,72 @@
+name: Windows release
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Check version
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'ferrum-chess' | Select-Object -ExpandProperty version
+          if ($env:GITHUB_REF_NAME -cne "v$version" -or $version -notmatch '^\d+\.\d+\.\d+$') { throw "Tag must match Cargo.toml version vX.Y.Z" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - name: Install cargo-dist and WiX
+        shell: pwsh
+        run: |
+          cargo install cargo-dist --version 0.33.1 --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-dist installation failed' }
+          dotnet tool install --global wix --version 4.0.5
+      - name: Build with cargo-dist
+        shell: pwsh
+        run: dist build --tag="v$env:VERSION" --artifacts=local --target=x86_64-pc-windows-msvc --no-local-paths
+      - name: Prepare Stockfish and portable files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release, stage | Out-Null
+          $app = Get-ChildItem target -Recurse -Filter ferrum-chess.exe | Where-Object { $_.FullName -match '[\\/]distrib[\\/]' } | Select-Object -First 1
+          if (!$app) { throw 'cargo-dist did not produce ferrum-chess.exe' }
+          Copy-Item $app.FullName stage/ferrum-chess.exe
+          Invoke-WebRequest 'https://github.com/official-stockfish/Stockfish/releases/download/sf_17.1/stockfish-windows-x86-64.zip' -OutFile stockfish.zip
+          Expand-Archive stockfish.zip -DestinationPath stockfish-dist
+          $engine = Get-ChildItem stockfish-dist -Recurse -Filter '*.exe' | Select-Object -First 1
+          if (!$engine) { throw 'Stockfish executable missing from archive' }
+          Copy-Item $engine.FullName stage/stockfish.exe
+          $license = Get-ChildItem stockfish-dist -Recurse -Filter Copying.txt | Select-Object -First 1
+          if (!$license) { $license = Get-ChildItem stockfish-dist -Recurse -Filter Copying | Select-Object -First 1 }
+          if (!$license) { throw 'Stockfish GPL license missing from archive' }
+          Copy-Item $license.FullName stage/Stockfish-GPL.txt
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, assets/OFL.txt, assets/shakmaty-GPL.txt stage/
+          Copy-Item stage/ferrum-chess.exe release/ferrum-chess.exe
+          Copy-Item stage/stockfish.exe release/stockfish.exe
+          Compress-Archive -Path stage/* -DestinationPath release/ferrum-chess-windows-portable.zip
+          Invoke-WebRequest 'https://github.com/official-stockfish/Stockfish/archive/refs/tags/sf_17.1.zip' -OutFile release/stockfish-17.1-source.zip
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          wix build -arch x64 -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "RulesLicense=$pwd\assets\shakmaty-GPL.txt" wix/main.wxs -o release/ferrum-chess-x64.msi
+          if ($LASTEXITCODE -ne 0) { throw 'WiX build failed' }
+      - name: Smoke-test MSI installation and engine
+        shell: pwsh
+        run: |
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "$pwd\release\ferrum-chess-x64.msi", '/qn', '/norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "MSI install failed: $($p.ExitCode)" }
+          $dir = "${env:ProgramFiles}\Ferrum Chess"
+          if (!(Test-Path "$dir\ferrum-chess.exe") -or !(Test-Path "$dir\stockfish.exe")) { throw 'Installed files missing' }
+          $reply = @('uci', 'isready', 'quit') | & "$dir\stockfish.exe"
+          if (($reply -join "`n") -notmatch 'readyok') { throw 'Stockfish UCI smoke test failed' }
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" release/* --title "Ferrum Chess $env:VERSION" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }

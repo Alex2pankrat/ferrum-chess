@@ -14,8 +14,8 @@ use iced::{
     },
     Color, Element, Length, Point, Rectangle, Renderer, Size, Task, Theme,
 };
-use shakmaty::{uci::UciMove, Color as Side, Position, Role, Square};
-use std::fmt;
+use cozy_chess::{Color as Side, Piece as Role, Square};
+use std::{fmt, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
 pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
@@ -93,6 +93,7 @@ struct App {
     selected: Option<Square>,
     analysis: Option<Analysis>,
     busy: bool,
+    search_cancel: Option<Arc<AtomicBool>>,
     generation: u64,
     notice: String,
 }
@@ -107,6 +108,7 @@ impl Default for App {
             selected: None,
             analysis: None,
             busy: false,
+            search_cancel: None,
             generation: 0,
             notice: "Choose a piece to see legal moves".into(),
         }
@@ -135,7 +137,7 @@ fn worker<T: Send + 'static>(
     job: impl FnOnce() -> T + Send + 'static,
 ) -> impl std::future::Future<Output = Result<T, String>> {
     let (send, recv) = oneshot::channel();
-    std::thread::spawn(move || {
+    let _ = std::thread::Builder::new().name("ferrum-worker".into()).spawn(move || {
         let _ = send.send(job());
     });
     async move {
@@ -146,14 +148,15 @@ fn worker<T: Send + 'static>(
 
 impl App {
     fn invalidate(&mut self) {
+        if let Some(cancel) = self.search_cancel.take() { cancel.store(true, Ordering::Relaxed); }
         self.generation = self.generation.wrapping_add(1);
         self.busy = false;
         self.analysis = None;
         self.selected = None;
     }
     fn search(&mut self) -> Task<Message> {
-        if self.game.position.is_game_over() {
-            self.notice = format!("Game over: {}", self.game.position.outcome());
+        if self.game.is_game_over() {
+            self.notice = format!("Game over: {}", self.game.result());
             return Task::none();
         }
         self.busy = true;
@@ -161,36 +164,32 @@ impl App {
         let generation = self.generation;
         let fen = self.game.fen();
         let depth = self.depth;
-        Task::perform(worker(move || engine::analyze(fen, depth)), move |result| {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search_cancel = Some(Arc::clone(&cancel));
+        Task::perform(worker(move || engine::analyze_with_cancel(fen, depth, cancel)), move |result| {
             Message::Engine(generation, result.and_then(std::convert::identity))
         })
     }
     fn maybe_search(&mut self) -> Task<Message> {
-        if self.mode == Mode::Analysis || self.game.position.turn() != self.player.side() {
+        if self.mode == Mode::Analysis || self.game.position.side_to_move() != self.player.side() {
             self.search()
         } else {
             Task::none()
         }
     }
     fn move_piece(&mut self, from: Square, to: Square) -> Task<Message> {
-        if self.busy || (self.mode == Mode::Play && self.game.position.turn() != self.player.side())
+        if self.busy || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
         {
             return Task::none();
         }
         match self.game.play(from, to, self.promotion.role()) {
             Ok(()) => {
                 self.invalidate();
-                self.notice = format!("{} to move", self.game.position.turn());
+                self.notice = format!("{:?} to move", self.game.position.side_to_move());
                 self.maybe_search()
             }
             Err(_) => {
-                self.selected = self
-                    .game
-                    .position
-                    .board()
-                    .piece_at(to)
-                    .filter(|p| p.color == self.game.position.turn())
-                    .map(|_| to);
+                self.selected = (self.game.position.color_on(to) == Some(self.game.position.side_to_move())).then_some(to);
                 Task::none()
             }
         }
@@ -199,7 +198,7 @@ impl App {
         match message {
             Message::Click(square) => {
                 if self.busy
-                    || (self.mode == Mode::Play && self.game.position.turn() != self.player.side())
+                    || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
                 {
                     return Task::none();
                 }
@@ -208,13 +207,7 @@ impl App {
                         return self.move_piece(from, square);
                     }
                 }
-                self.selected = self
-                    .game
-                    .position
-                    .board()
-                    .piece_at(square)
-                    .filter(|p| p.color == self.game.position.turn())
-                    .map(|_| square);
+                self.selected = (self.game.position.color_on(square) == Some(self.game.position.side_to_move())).then_some(square);
             }
             Message::Drag(from, to) => return self.move_piece(from, to),
             Message::Mode(mode) => {
@@ -248,7 +241,7 @@ impl App {
                 self.invalidate();
                 if self.game.undo()
                     && self.mode == Mode::Play
-                    && self.game.position.turn() != self.player.side()
+                    && self.game.position.side_to_move() != self.player.side()
                 {
                     self.game.undo();
                 }
@@ -266,6 +259,7 @@ impl App {
                     return Task::none();
                 }
                 self.busy = false;
+                self.search_cancel = None;
                 match result {
                     Ok(analysis) => {
                         self.notice = format!(
@@ -273,7 +267,7 @@ impl App {
                             analysis.score, analysis.depth, analysis.best_move
                         );
                         if self.mode == Mode::Play
-                            && self.game.position.turn() != self.player.side()
+                            && self.game.position.side_to_move() != self.player.side()
                         {
                             if let Err(e) = self.game.play_uci(&analysis.best_move) {
                                 self.notice = e;
@@ -393,6 +387,12 @@ impl App {
     }
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.search_cancel.take() { cancel.store(true, Ordering::Relaxed); }
+    }
+}
+
 struct Board<'a> {
     app: &'a App,
 }
@@ -408,7 +408,7 @@ impl Board<'_> {
         } else {
             (7 - x, y)
         };
-        Square::from_ascii(&[b'a' + file, b'1' + rank]).ok()
+        Square::try_index(usize::from(rank) * 8 + usize::from(file))
     }
     fn center(&self, sq: Square) -> Point {
         let name = sq.to_string();
@@ -471,7 +471,7 @@ impl canvas::Program<Message> for Board<'_> {
                 else {
                     continue;
                 };
-                let is_last = matches!(last, Some(UciMove::Normal { from, to, .. }) if square == from || square == to);
+                let is_last = matches!(last, Some((from, to)) if square == from || square == to);
                 let color = if self.app.selected == Some(square) {
                     Color::from_rgb8(221, 195, 102)
                 } else if is_last {
@@ -488,8 +488,8 @@ impl canvas::Program<Message> for Board<'_> {
                         Color::from_rgba8(24, 46, 35, 0.45),
                     );
                 }
-                if let Some(piece) = self.app.game.position.board().piece_at(square) {
-                    let glyph = match (piece.color, piece.role) {
+                if let (Some(color), Some(piece)) = (self.app.game.position.color_on(square), self.app.game.position.piece_on(square)) {
+                    let glyph = match (color, piece) {
                         (Side::White, Role::King) => "♔",
                         (Side::White, Role::Queen) => "♕",
                         (Side::White, Role::Rook) => "♖",
@@ -517,7 +517,10 @@ impl canvas::Program<Message> for Board<'_> {
             }
         }
         if let Some(analysis) = &self.app.analysis {
-            if let Ok(UciMove::Normal { from, to, .. }) = analysis.best_move.parse() {
+            if let (Some(from), Some(to)) = (
+                analysis.best_move.get(..2).and_then(|s| s.parse().ok()),
+                analysis.best_move.get(2..4).and_then(|s| s.parse().ok()),
+            ) {
                 let a = self.center(from);
                 let b = self.center(to);
                 frame.stroke(

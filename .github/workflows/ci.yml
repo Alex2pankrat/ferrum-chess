@@ -13,8 +13,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev stockfish
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - name: Test rules and Stockfish integration
+        run: timeout 180 cargo test
+        env:
+          FERRUM_STOCKFISH: /usr/games/stockfish
       - run: cargo build --release

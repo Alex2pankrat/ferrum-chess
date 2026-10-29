@@ -1,5 +1,5 @@
 //! Iced MVU application and interactive board.
-use crate::{
+use ferrum_chess::{
     engine::{self, Analysis},
     game::Game,
 };

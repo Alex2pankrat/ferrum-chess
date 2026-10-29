@@ -5,13 +5,12 @@ use ferrum_chess::{
     game::Game,
 };
 use iced::{
-    alignment,
     futures::channel::oneshot,
     mouse,
     widget::{
         button,
         canvas::{self, Canvas, Frame, Geometry, Path, Stroke},
-        column, container, pick_list, row, scrollable, text,
+        column, container, pick_list, responsive, row, scrollable, svg, text,
     },
     Color, Element, Length, Point, Rectangle, Renderer, Size, Task, Theme,
 };
@@ -19,16 +18,25 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
 };
 
 pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
         .title("Ferrum Chess")
-        .font(include_bytes!("../assets/NotoSansSymbols2-Regular.ttf").as_slice())
-        .theme(Theme::Dark)
-        .window_size(Size::new(1024.0, 720.0))
+        .theme(Theme::custom(
+            "Ferrum",
+            iced::theme::Palette {
+                background: Color::from_rgb8(20, 25, 27),
+                text: Color::from_rgb8(235, 238, 229),
+                primary: Color::from_rgb8(142, 181, 123),
+                success: Color::from_rgb8(142, 181, 123),
+                warning: Color::from_rgb8(226, 182, 98),
+                danger: Color::from_rgb8(202, 100, 96),
+            },
+        ))
+        .window_size(Size::new(1200.0, 800.0))
         .run()
 }
 
@@ -94,6 +102,7 @@ struct App {
     game: Game,
     mode: Mode,
     player: Player,
+    flipped: bool,
     promotion: Promotion,
     depth: u32,
     selected: Option<Square>,
@@ -109,6 +118,7 @@ impl Default for App {
             game: Game::default(),
             mode: Mode::Play,
             player: Player::White,
+            flipped: false,
             promotion: Promotion::Queen,
             depth: 10,
             selected: None,
@@ -128,6 +138,7 @@ enum Message {
     Player(Player),
     Depth(u32),
     Promotion(Promotion),
+    Flip,
     New,
     Reset,
     Undo,
@@ -232,6 +243,7 @@ impl App {
             }
             Message::Player(player) => {
                 self.player = player;
+                self.flipped = player == Player::Black;
                 self.game = Game::default();
                 self.invalidate();
                 return self.maybe_search();
@@ -242,6 +254,7 @@ impl App {
                 return self.maybe_search();
             }
             Message::Promotion(p) => self.promotion = p,
+            Message::Flip => self.flipped = !self.flipped,
             Message::New => {
                 self.game = Game::default();
                 self.invalidate();
@@ -355,50 +368,246 @@ impl App {
         Task::none()
     }
     fn view(&self) -> Element<'_, Message> {
-        let board = Canvas::new(Board { app: self }).width(512).height(512);
-        let controls = column![
-            text("FERRUM CHESS").size(26),
-            text("OFFLINE CHESS STUDIO").size(12),
-            row![
-                button("New game").on_press(Message::New),
-                button("Restart").on_press(Message::Reset),
-                button("Undo").on_press(Message::Undo)
+        responsive(move |size| self.layout(size)).into()
+    }
+
+    fn layout(&self, size: Size) -> Element<'_, Message> {
+        let compact = size.width < 900.0;
+        let board_size = if compact {
+            (size.width - 48.0).min(720.0)
+        } else {
+            (size.width - 406.0).min(size.height - 206.0).min(760.0)
+        }
+        .max(80.0);
+        let is_analysis = self.mode == Mode::Analysis;
+        let top = row![
+            column![
+                text("FERRUM").size(20),
+                text("CHESS STUDIO").size(10).color(muted()),
             ]
-            .spacing(8),
-            text("Mode"),
-            pick_list([Mode::Play, Mode::Analysis], Some(self.mode), Message::Mode),
-            text("Play as (starts a new game)"),
-            pick_list(
-                [Player::White, Player::Black],
-                Some(self.player),
-                Message::Player
-            ),
-            text("Search depth"),
-            pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth),
-            text("Promote pawn to"),
-            pick_list(
-                [
-                    Promotion::Queen,
-                    Promotion::Rook,
-                    Promotion::Bishop,
-                    Promotion::Knight
-                ],
-                Some(self.promotion),
-                Message::Promotion
-            ),
-            row![
-                button("Open PGN").on_press(Message::Open),
-                button("Save PGN").on_press(Message::Save),
-                button("Analyze").on_press(Message::Analyze)
-            ]
-            .spacing(8),
-            text(&self.notice).size(14),
-            text("MOVES").size(12),
-            scrollable(text(self.game.moves().join("  ")).size(16)).height(Length::Fill),
+            .spacing(0)
+            .width(Length::Fill),
+            button("Play")
+                .on_press(Message::Mode(Mode::Play))
+                .style(if is_analysis {
+                    button::secondary
+                } else {
+                    button::primary
+                })
+                .padding([9, 18]),
+            button("Analysis")
+                .on_press(Message::Mode(Mode::Analysis))
+                .style(if is_analysis {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .padding([9, 18]),
         ]
-        .spacing(9)
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let board = Canvas::new(Board { app: self })
+            .width(board_size)
+            .height(board_size);
+        let opponent = if self.flipped { "White" } else { "Black" };
+        let bottom = if self.flipped { "Black" } else { "White" };
+        let board_area = column![
+            row![
+                text(opponent).size(16),
+                text("  •  ").color(muted()),
+                text(if is_analysis {
+                    "Analysis"
+                } else if self.player.side()
+                    == if self.flipped {
+                        Side::White
+                    } else {
+                        Side::Black
+                    }
+                {
+                    "You"
+                } else {
+                    "Stockfish"
+                })
+                .size(13)
+                .color(muted())
+            ]
+            .align_y(iced::Alignment::Center),
+            board,
+            row![
+                text(bottom).size(16),
+                text("  •  ").color(muted()),
+                text(if is_analysis {
+                    "Analysis"
+                } else if self.player.side()
+                    == if self.flipped {
+                        Side::Black
+                    } else {
+                        Side::White
+                    }
+                {
+                    "You"
+                } else {
+                    "Stockfish"
+                })
+                .size(13)
+                .color(muted())
+            ]
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(8);
+
+        let moves = self.game.moves();
+        let move_text = if moves.is_empty() {
+            "Your moves will appear here.".to_owned()
+        } else {
+            moves
+                .chunks(2)
+                .enumerate()
+                .map(|(i, pair)| {
+                    format!(
+                        "{:>2}.  {:<8} {}",
+                        i + 1,
+                        pair[0],
+                        pair.get(1).map_or("", String::as_str)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let heading = if is_analysis {
+            "Analysis board"
+        } else {
+            "Play Stockfish"
+        };
+        let mode_description = if is_analysis {
+            "Explore a position with the engine"
+        } else {
+            "A game at your own pace"
+        };
+        let status = if self.busy {
+            "ENGINE THINKING"
+        } else if self.game.is_game_over() {
+            "GAME OVER"
+        } else {
+            "READY"
+        };
+        let panel = column![
+            text(heading).size(24),
+            text(mode_description).size(13).color(muted()),
+            container(
+                column![
+                    text(status).size(11).color(accent()),
+                    text(&self.notice).size(14),
+                ]
+                .spacing(6)
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(card_style),
+            row![
+                button("New game").on_press(Message::New).padding([9, 12]),
+                button("Undo")
+                    .on_press(Message::Undo)
+                    .style(button::secondary)
+                    .padding([9, 12]),
+                button("Flip board")
+                    .on_press(Message::Flip)
+                    .style(button::secondary)
+                    .padding([9, 12]),
+            ]
+            .spacing(6),
+            text("GAME SETTINGS").size(11).color(muted()),
+            row![
+                column![
+                    text("Play as").size(12).color(muted()),
+                    pick_list(
+                        [Player::White, Player::Black],
+                        Some(self.player),
+                        Message::Player
+                    )
+                    .width(Length::Fill)
+                ]
+                .spacing(5)
+                .width(Length::Fill),
+                column![
+                    text("Engine depth").size(12).color(muted()),
+                    pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth)
+                        .width(Length::Fill)
+                ]
+                .spacing(5)
+                .width(Length::Fill),
+            ]
+            .spacing(10),
+            row![
+                column![
+                    text("Pawn promotion").size(12).color(muted()),
+                    pick_list(
+                        [
+                            Promotion::Queen,
+                            Promotion::Rook,
+                            Promotion::Bishop,
+                            Promotion::Knight
+                        ],
+                        Some(self.promotion),
+                        Message::Promotion
+                    )
+                    .width(Length::Fill)
+                ]
+                .spacing(5)
+                .width(Length::Fill),
+                button("Restart")
+                    .on_press(Message::Reset)
+                    .style(button::secondary)
+                    .padding([9, 12]),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::End),
+            row![
+                text("MOVES").size(11).color(muted()).width(Length::Fill),
+                text(format!("{} plies", moves.len()))
+                    .size(11)
+                    .color(muted())
+            ]
+            .align_y(iced::Alignment::Center),
+            container(scrollable(text(move_text).size(15)).height(110))
+                .padding(12)
+                .width(Length::Fill)
+                .style(card_style),
+            row![
+                button("Open PGN")
+                    .on_press(Message::Open)
+                    .style(button::secondary)
+                    .padding([9, 12]),
+                button("Save PGN")
+                    .on_press(Message::Save)
+                    .style(button::secondary)
+                    .padding([9, 12]),
+                button("Analyze")
+                    .on_press(Message::Analyze)
+                    .style(button::secondary)
+                    .padding([9, 12]),
+            ]
+            .spacing(6),
+        ]
+        .spacing(10)
         .width(Length::Fill);
-        container(row![board, controls].spacing(24).padding(24)).into()
+        let content: Element<'_, Message> = if compact {
+            scrollable(column![board_area, panel].spacing(24))
+                .height(Length::Fill)
+                .into()
+        } else {
+            row![
+                board_area,
+                scrollable(panel).width(340).height(Length::Fill)
+            ]
+            .spacing(28)
+            .into()
+        };
+        container(column![top, content].spacing(24).padding(24))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 }
 
@@ -410,33 +619,83 @@ impl Drop for App {
     }
 }
 
+fn muted() -> Color {
+    Color::from_rgb8(149, 160, 154)
+}
+
+fn accent() -> Color {
+    Color::from_rgb8(160, 195, 137)
+}
+
+fn card_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::from_rgb8(33, 41, 40).into()),
+        border: iced::border::rounded(8),
+        ..container::Style::default()
+    }
+}
+
+// Handles are reused between frames so the renderer can cache the SVG data.
+fn piece_handle(color: Side, piece: Role) -> &'static svg::Handle {
+    static PIECES: OnceLock<[svg::Handle; 12]> = OnceLock::new();
+    let pieces = PIECES.get_or_init(|| {
+        [
+            include_bytes!("../assets/pieces/livius/wk.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/wq.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/wr.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/wb.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/wn.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/wp.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/bk.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/bq.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/br.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/bb.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/bn.svg").as_slice(),
+            include_bytes!("../assets/pieces/livius/bp.svg").as_slice(),
+        ]
+        .map(svg::Handle::from_memory)
+    });
+    let offset = if color == Side::White { 0 } else { 6 };
+    let index = match piece {
+        Role::King => 0,
+        Role::Queen => 1,
+        Role::Rook => 2,
+        Role::Bishop => 3,
+        Role::Knight => 4,
+        Role::Pawn => 5,
+    };
+    &pieces[offset + index]
+}
+
 struct Board<'a> {
     app: &'a App,
 }
 impl Board<'_> {
-    fn square(&self, point: Point) -> Option<Square> {
-        if !(0.0..512.0).contains(&point.x) || !(0.0..512.0).contains(&point.y) {
+    fn square(&self, point: Point, size: f32) -> Option<Square> {
+        if size <= 0.0 || !(0.0..size).contains(&point.x) || !(0.0..size).contains(&point.y) {
             return None;
         }
-        let x = (point.x / 64.0) as u8;
-        let y = (point.y / 64.0) as u8;
-        let (file, rank) = if self.app.player == Player::White {
-            (x, 7 - y)
-        } else {
+        let cell = size / 8.0;
+        let x = (point.x / cell) as u8;
+        let y = (point.y / cell) as u8;
+        let (file, rank) = if self.app.flipped {
             (7 - x, y)
+        } else {
+            (x, 7 - y)
         };
         Square::try_index(usize::from(rank) * 8 + usize::from(file))
     }
-    fn center(&self, sq: Square) -> Point {
+    fn center(&self, sq: Square, size: f32) -> Point {
         let name = sq.to_string();
         let b = name.as_bytes();
         let (f, r) = (b[0] - b'a', b[1] - b'1');
-        let (x, y) = if self.app.player == Player::White {
-            (f, 7 - r)
-        } else {
+        let (x, y) = if self.app.flipped {
             (7 - f, r)
+        } else {
+            (f, 7 - r)
         };
-        Point::new(f32::from(x) * 64.0 + 32.0, f32::from(y) * 64.0 + 32.0)
+        let cell = size / 8.0;
+        Point::new((f32::from(x) + 0.5) * cell, (f32::from(y) + 0.5) * cell)
     }
 }
 impl canvas::Program<Message> for Board<'_> {
@@ -448,15 +707,16 @@ impl canvas::Program<Message> for Board<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
+        let size = bounds.width.min(bounds.height);
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let sq = self.square(cursor.position_in(bounds)?)?;
+                let sq = self.square(cursor.position_in(bounds)?, size)?;
                 *state = Some(sq);
                 Some(canvas::Action::publish(Message::Click(sq)).and_capture())
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 let from = state.take()?;
-                let to = self.square(cursor.position_in(bounds)?)?;
+                let to = self.square(cursor.position_in(bounds)?, size)?;
                 if from != to {
                     Some(canvas::Action::publish(Message::Drag(from, to)).and_capture())
                 } else {
@@ -475,6 +735,8 @@ impl canvas::Program<Message> for Board<'_> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
+        let size = bounds.width.min(bounds.height);
+        let cell = size / 8.0;
         let targets = self
             .app
             .selected
@@ -483,54 +745,73 @@ impl canvas::Program<Message> for Board<'_> {
         let last = self.app.game.last_move();
         for y in 0..8 {
             for x in 0..8 {
-                let top_left = Point::new(x as f32 * 64.0, y as f32 * 64.0);
-                let Some(square) = self.square(Point::new(top_left.x + 32.0, top_left.y + 32.0))
-                else {
+                let top_left = Point::new(x as f32 * cell, y as f32 * cell);
+                let Some(square) = self.square(
+                    Point::new(top_left.x + cell / 2.0, top_left.y + cell / 2.0),
+                    size,
+                ) else {
                     continue;
                 };
                 let is_last = matches!(last, Some((from, to)) if square == from || square == to);
+                let light = (x + y) % 2 == 0;
                 let color = if self.app.selected == Some(square) {
-                    Color::from_rgb8(221, 195, 102)
+                    Color::from_rgb8(225, 198, 108)
                 } else if is_last {
-                    Color::from_rgb8(175, 184, 95)
-                } else if (x + y) % 2 == 0 {
-                    Color::from_rgb8(235, 230, 211)
+                    if light {
+                        Color::from_rgb8(211, 214, 139)
+                    } else {
+                        Color::from_rgb8(163, 179, 105)
+                    }
+                } else if light {
+                    Color::from_rgb8(232, 231, 210)
                 } else {
-                    Color::from_rgb8(111, 139, 111)
+                    Color::from_rgb8(113, 145, 119)
                 };
-                frame.fill_rectangle(top_left, Size::new(64.0, 64.0), color);
+                frame.fill_rectangle(top_left, Size::new(cell, cell), color);
                 if targets.contains(&square) {
                     frame.fill(
-                        &Path::circle(Point::new(top_left.x + 32.0, top_left.y + 32.0), 9.0),
-                        Color::from_rgba8(24, 46, 35, 0.45),
+                        &Path::circle(
+                            Point::new(top_left.x + cell / 2.0, top_left.y + cell / 2.0),
+                            cell * 0.14,
+                        ),
+                        Color::from_rgba8(24, 46, 35, 0.35),
                     );
                 }
                 if let (Some(color), Some(piece)) = (
                     self.app.game.position.color_on(square),
                     self.app.game.position.piece_on(square),
                 ) {
-                    let glyph = match (color, piece) {
-                        (Side::White, Role::King) => "♔",
-                        (Side::White, Role::Queen) => "♕",
-                        (Side::White, Role::Rook) => "♖",
-                        (Side::White, Role::Bishop) => "♗",
-                        (Side::White, Role::Knight) => "♘",
-                        (Side::White, Role::Pawn) => "♙",
-                        (Side::Black, Role::King) => "♚",
-                        (Side::Black, Role::Queen) => "♛",
-                        (Side::Black, Role::Rook) => "♜",
-                        (Side::Black, Role::Bishop) => "♝",
-                        (Side::Black, Role::Knight) => "♞",
-                        (Side::Black, Role::Pawn) => "♟",
-                    };
+                    frame.draw_svg(
+                        Rectangle {
+                            x: top_left.x + cell * 0.025,
+                            y: top_left.y + cell * 0.025,
+                            width: cell * 0.95,
+                            height: cell * 0.95,
+                        },
+                        piece_handle(color, piece),
+                    );
+                }
+                let name = square.to_string();
+                let label_color = if light {
+                    Color::from_rgb8(99, 127, 101)
+                } else {
+                    Color::from_rgb8(226, 230, 208)
+                };
+                if x == 0 {
                     frame.fill_text(canvas::Text {
-                        content: glyph.into(),
-                        font: iced::Font::with_name("Noto Sans Symbols 2"),
-                        position: Point::new(top_left.x + 32.0, top_left.y + 32.0),
-                        size: 50.0.into(),
-                        color: Color::from_rgb8(25, 32, 29),
-                        align_x: alignment::Horizontal::Center.into(),
-                        align_y: alignment::Vertical::Center,
+                        content: name[1..2].into(),
+                        position: Point::new(top_left.x + cell * 0.06, top_left.y + cell * 0.04),
+                        size: (cell * 0.17).into(),
+                        color: label_color,
+                        ..canvas::Text::default()
+                    });
+                }
+                if y == 7 {
+                    frame.fill_text(canvas::Text {
+                        content: name[..1].into(),
+                        position: Point::new(top_left.x + cell * 0.82, top_left.y + cell * 0.79),
+                        size: (cell * 0.17).into(),
+                        color: label_color,
                         ..canvas::Text::default()
                     });
                 }
@@ -543,15 +824,18 @@ impl canvas::Program<Message> for Board<'_> {
             ))
         });
         if let Some((from, to)) = hint {
-            let a = self.center(from);
-            let b = self.center(to);
+            let a = self.center(from, size);
+            let b = self.center(to, size);
             frame.stroke(
                 &Path::line(a, b),
                 Stroke::default()
-                    .with_width(7.0)
+                    .with_width(cell * 0.11)
                     .with_color(Color::from_rgba8(242, 153, 45, 0.8)),
             );
-            frame.fill(&Path::circle(b, 8.0), Color::from_rgb8(242, 153, 45));
+            frame.fill(
+                &Path::circle(b, cell * 0.13),
+                Color::from_rgb8(242, 153, 45),
+            );
         }
         vec![frame.into_geometry()]
     }
@@ -565,20 +849,63 @@ mod tests {
     fn board_coordinates_follow_player_orientation() {
         let mut app = App::default();
         let board = Board { app: &app };
-        assert_eq!(board.square(Point::new(0.0, 0.0)), Some(Square::A8));
-        assert_eq!(board.square(Point::new(511.0, 511.0)), Some(Square::H1));
-        assert_eq!(board.square(Point::new(512.0, 0.0)), None);
-        assert_eq!(board.square(Point::new(-1.0, 0.0)), None);
-        for square in [Square::A1, Square::E4, Square::H8] {
-            assert_eq!(board.square(board.center(square)), Some(square));
+        assert_eq!(board.square(Point::new(0.0, 0.0), 512.0), Some(Square::A8));
+        assert_eq!(
+            board.square(Point::new(511.0, 511.0), 512.0),
+            Some(Square::H1)
+        );
+        assert_eq!(board.square(Point::new(512.0, 0.0), 512.0), None);
+        assert_eq!(board.square(Point::new(-1.0, 0.0), 512.0), None);
+        for size in [80.0, 300.0, 512.0, 900.0] {
+            for square in [Square::A1, Square::E4, Square::H8] {
+                assert_eq!(board.square(board.center(square, size), size), Some(square));
+            }
         }
-        app.player = Player::Black;
+        app.flipped = true;
         let board = Board { app: &app };
-        assert_eq!(board.square(Point::new(0.0, 0.0)), Some(Square::H1));
-        assert_eq!(board.square(Point::new(511.0, 511.0)), Some(Square::A8));
-        for square in [Square::A1, Square::E4, Square::H8] {
-            assert_eq!(board.square(board.center(square)), Some(square));
+        assert_eq!(board.square(Point::new(0.0, 0.0), 512.0), Some(Square::H1));
+        assert_eq!(
+            board.square(Point::new(511.0, 511.0), 512.0),
+            Some(Square::A8)
+        );
+        for size in [80.0, 300.0, 512.0, 900.0] {
+            for square in [Square::A1, Square::E4, Square::H8] {
+                assert_eq!(board.square(board.center(square, size), size), Some(square));
+            }
         }
+    }
+
+    #[test]
+    fn flipping_preserves_game_and_player() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        let fen = app.game.fen();
+        let _ = app.update(Message::Flip);
+        assert!(app.flipped);
+        assert_eq!(app.player, Player::White);
+        assert_eq!(app.game.fen(), fen);
+        let _ = app.update(Message::Flip);
+        assert!(!app.flipped);
+    }
+
+    #[test]
+    fn all_piece_images_are_distinct() {
+        let mut ids = Vec::new();
+        for color in [Side::White, Side::Black] {
+            for piece in [
+                Role::King,
+                Role::Queen,
+                Role::Rook,
+                Role::Bishop,
+                Role::Knight,
+                Role::Pawn,
+            ] {
+                ids.push(piece_handle(color, piece).id());
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 12);
     }
 
     #[test]

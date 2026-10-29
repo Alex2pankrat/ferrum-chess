@@ -7,7 +7,7 @@ description = "Offline chess desktop application"
 repository = "https://github.com/Alex2pankrat/ferrum-chess"
 
 [dependencies]
-iced = { version = "0.14", features = ["canvas", "tokio"] }
+iced = { version = "0.14", features = ["canvas", "svg", "tokio"] }
 cozy-chess = { version = "0.3.4", features = ["std"] }
 rfd = "0.15"
 

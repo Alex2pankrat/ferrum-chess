@@ -1,0 +1,19 @@
+name: Bug report
+description: Report a reproducible problem
+body:
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+  - type: input
+    id: system
+    attributes:
+      label: OS, application version and Stockfish version
+    validations:
+      required: true

@@ -113,14 +113,23 @@ jobs:
           name: ferrum-chess-windows
           path: release/*
           if-no-files-found: error
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: windows
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ferrum-chess-windows
+          path: release
       - name: Publish GitHub release
-        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: pwsh
         run: |
           $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
-          gh release create "$env:GITHUB_REF_NAME" @assets --verify-tag --title "Ferrum Chess $env:VERSION" --generate-notes
+          gh release create "$env:GITHUB_REF_NAME" @assets --verify-tag --title "Ferrum Chess $env:GITHUB_REF_NAME" --generate-notes
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
-    permissions:
-      contents: write

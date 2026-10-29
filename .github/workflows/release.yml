@@ -78,6 +78,7 @@ jobs:
           Copy-Item stage/stockfish.exe release/stockfish.exe
           Compress-Archive -Path stage/* -DestinationPath release/ferrum-chess-windows-portable.zip
           Copy-Item Cargo.lock release/Cargo.lock
+          Copy-Item stockfish.zip release/stockfish-17.1-official.zip
           Invoke-WebRequest 'https://github.com/official-stockfish/Stockfish/archive/refs/tags/sf_17.1.zip' -OutFile release/stockfish-17.1-source.zip
       - name: Build MSI with WiX
         shell: pwsh

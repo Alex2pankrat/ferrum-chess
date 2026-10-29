@@ -110,7 +110,9 @@ struct App {
     flipped: bool,
     preferences: Preferences,
     settings_open: bool,
+    settings_error: Option<String>,
     pending_promotion: Option<(Square, Square)>,
+    review: Option<Game>,
     move_input: String,
     depth: u32,
     selected: Option<Square>,
@@ -129,7 +131,9 @@ impl Default for App {
             flipped: false,
             preferences: Preferences::load(),
             settings_open: false,
+            settings_error: None,
             pending_promotion: None,
+            review: None,
             move_input: String::new(),
             depth: 10,
             selected: None,
@@ -156,6 +160,7 @@ enum Message {
     Coordinates(bool),
     MoveTextChanged(String),
     SubmitMove,
+    Review(usize),
     Flip,
     New,
     Reset,
@@ -221,6 +226,7 @@ impl App {
     fn move_piece(&mut self, from: Square, to: Square) -> Task<Message> {
         if self.busy
             || self.pending_promotion.is_some()
+            || self.review.is_some()
             || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
         {
             return Task::none();
@@ -239,6 +245,7 @@ impl App {
     fn finish_move(&mut self, from: Square, to: Square, promotion: Role) -> Task<Message> {
         match self.game.play(from, to, promotion) {
             Ok(()) => {
+                self.review = None;
                 self.invalidate();
                 self.notice = format!("{:?} to move", self.game.position.side_to_move());
                 self.maybe_search()
@@ -252,15 +259,14 @@ impl App {
         }
     }
     fn save_preferences(&mut self) {
-        if let Err(error) = self.preferences.save() {
-            self.notice = error;
-        }
+        self.settings_error = self.preferences.save().err();
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Click(square) => {
                 if self.busy
                     || self.pending_promotion.is_some()
+                    || self.review.is_some()
                     || (self.mode == Mode::Play
                         && self.game.position.side_to_move() != self.player.side())
                 {
@@ -284,6 +290,7 @@ impl App {
                 self.player = player;
                 self.flipped = player == Player::Black;
                 self.game = Game::default();
+                self.review = None;
                 self.invalidate();
                 return self.maybe_search();
             }
@@ -318,6 +325,7 @@ impl App {
             Message::SubmitMove => {
                 if self.busy
                     || self.pending_promotion.is_some()
+                    || self.review.is_some()
                     || self.game.is_game_over()
                     || (self.mode == Mode::Play
                         && self.game.position.side_to_move() != self.player.side())
@@ -341,6 +349,7 @@ impl App {
                         match self.game.play_uci(&input) {
                             Ok(()) => {
                                 self.move_input.clear();
+                                self.review = None;
                                 self.invalidate();
                                 self.notice =
                                     format!("{:?} to move", self.game.position.side_to_move());
@@ -355,18 +364,42 @@ impl App {
                     self.notice = "Enter a move like e2e4 or e7e8q".into();
                 }
             }
+            Message::Review(ply) => {
+                let full_game = self.review.clone().unwrap_or_else(|| self.game.clone());
+                if let Some(position) = full_game.at_ply(ply) {
+                    self.invalidate();
+                    let total = full_game.moves().len();
+                    self.game = position;
+                    self.review = (ply < total).then_some(full_game);
+                    self.notice = if self.review.is_some() {
+                        format!(
+                            "Reviewing move {ply} of {total} — return to the latest move to play"
+                        )
+                    } else {
+                        "Latest position".into()
+                    };
+                    if self.review.is_none() {
+                        return self.maybe_search();
+                    }
+                }
+            }
             Message::Flip => self.flipped = !self.flipped,
             Message::New => {
                 self.game = Game::default();
+                self.review = None;
                 self.invalidate();
                 return self.maybe_search();
             }
             Message::Reset => {
                 self.game.reset();
+                self.review = None;
                 self.invalidate();
                 return self.maybe_search();
             }
             Message::Undo => {
+                if self.review.is_some() {
+                    return self.update(Message::Review(self.game.moves().len().saturating_sub(1)));
+                }
                 self.invalidate();
                 if self.game.undo()
                     && self.mode == Mode::Play
@@ -395,6 +428,7 @@ impl App {
                         );
                         if self.mode == Mode::Play
                             && self.game.position.side_to_move() != self.player.side()
+                            && self.review.is_none()
                         {
                             if let Err(e) = self.game.play_uci(&analysis.best_move) {
                                 self.notice = e;
@@ -435,6 +469,7 @@ impl App {
                 match result {
                     Ok(Some(game)) => {
                         self.game = *game;
+                        self.review = None;
                         self.invalidate();
                         self.notice = "PGN loaded".into();
                         return self.maybe_search();
@@ -444,7 +479,7 @@ impl App {
                 }
             }
             Message::Save => {
-                let pgn = self.game.to_pgn();
+                let pgn = self.review.as_ref().unwrap_or(&self.game).to_pgn();
                 return Task::perform(
                     worker(move || {
                         let Some(path) = rfd::FileDialog::new()
@@ -611,23 +646,30 @@ impl App {
         ]
         .spacing(8);
 
-        let moves = self.game.moves();
-        let move_text = if moves.is_empty() {
-            "Your moves will appear here.".to_owned()
+        let current_ply = self.game.moves().len();
+        let full_game = self.review.as_ref().unwrap_or(&self.game);
+        let moves = full_game.numbered_moves();
+        let total_moves = moves.len();
+        let move_list: Element<'_, Message> = if moves.is_empty() {
+            text("Your moves will appear here.")
+                .size(14)
+                .color(muted())
+                .into()
         } else {
-            moves
-                .chunks(2)
-                .enumerate()
-                .map(|(i, pair)| {
-                    format!(
-                        "{:>2}.  {:<8} {}",
-                        i + 1,
-                        pair[0],
-                        pair.get(1).map_or("", String::as_str)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            column(moves.into_iter().enumerate().map(|(index, label)| {
+                button(text(label).size(14).width(Length::Fill))
+                    .style(if current_ply == index + 1 {
+                        button::secondary
+                    } else {
+                        button::text
+                    })
+                    .padding([5, 8])
+                    .width(Length::Fill)
+                    .on_press(Message::Review(index + 1))
+                    .into()
+            }))
+            .spacing(2)
+            .into()
         };
         let heading = if is_analysis {
             "Analysis board"
@@ -641,6 +683,8 @@ impl App {
         };
         let status = if self.busy {
             "ENGINE THINKING"
+        } else if self.review.is_some() {
+            "REVIEW"
         } else if self.game.is_game_over() {
             "GAME OVER"
         } else {
@@ -675,9 +719,17 @@ impl App {
                 .padding(18)
                 .width(Length::Fill)
                 .style(card_style),
-                text("Settings are stored on this device.")
-                    .size(12)
-                    .color(muted()),
+                text(
+                    self.settings_error
+                        .as_deref()
+                        .unwrap_or("Settings are stored on this device.")
+                )
+                .size(12)
+                .color(if self.settings_error.is_some() {
+                    Color::from_rgb8(235, 145, 140)
+                } else {
+                    muted()
+                }),
                 button("Back to game")
                     .on_press(Message::Appearance(false))
                     .padding([9, 12]),
@@ -747,12 +799,27 @@ impl App {
                 .spacing(10),
                 row![
                     text("MOVES").size(11).color(muted()).width(Length::Fill),
-                    text(format!("{} plies", moves.len()))
+                    text(format!("{current_ply} / {total_moves} plies"))
                         .size(11)
                         .color(muted())
                 ]
                 .align_y(iced::Alignment::Center),
-                container(scrollable(text(move_text).size(15)).height(110))
+                row![
+                    button("|<")
+                        .on_press(Message::Review(0))
+                        .style(button::secondary),
+                    button("<")
+                        .on_press(Message::Review(current_ply.saturating_sub(1)))
+                        .style(button::secondary),
+                    button(">")
+                        .on_press(Message::Review((current_ply + 1).min(total_moves)))
+                        .style(button::secondary),
+                    button(">|")
+                        .on_press(Message::Review(total_moves))
+                        .style(button::secondary),
+                ]
+                .spacing(6),
+                container(scrollable(move_list).height(110))
                     .padding(12)
                     .width(Length::Fill)
                     .style(card_style),
@@ -1246,6 +1313,23 @@ mod tests {
         ));
         assert!(!state.dragging);
         assert!(state.pressed.is_none());
+    }
+
+    #[test]
+    fn review_preserves_future_and_blocks_accidental_moves() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        app.game.play_uci("e7e5").unwrap();
+        let final_fen = app.game.fen();
+        let _ = app.update(Message::Review(0));
+        assert_eq!(app.game.fen(), Game::default().fen());
+        let _ = app.update(Message::Drag(Square::D2, Square::D4));
+        assert_eq!(app.game.fen(), Game::default().fen());
+        let _ = app.update(Message::Review(1));
+        assert_eq!(app.game.moves(), ["e4"]);
+        let _ = app.update(Message::Review(2));
+        assert_eq!(app.game.fen(), final_fen);
+        assert!(app.review.is_none());
     }
 
     #[test]

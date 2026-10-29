@@ -123,3 +123,14 @@ fn application_self_test_uses_real_engine_when_configured() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Self-test passed"));
 }
+
+#[test]
+fn review_positions_preserve_the_original_and_number_black_to_move() {
+    let game = Game::from_pgn(b"[FEN \"7k/8/8/8/8/5K2/8/7R b - - 0 22\"]\n\n22... Kg7 23. Kf4 *")
+        .expect("valid game");
+    assert_eq!(game.numbered_moves(), ["22... Kg7", "23. Kf4"]);
+    let start = game.at_ply(0).unwrap();
+    assert!(start.moves().is_empty());
+    assert_eq!(game.moves(), ["Kg7", "Kf4"]);
+    assert!(game.at_ply(3).is_none());
+}

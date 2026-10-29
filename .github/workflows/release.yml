@@ -62,6 +62,7 @@ jobs:
           $dist.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           dotnet tool install --global wix --version 4.0.5
           if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed' }
+          Join-Path $env:USERPROFILE '.dotnet\tools' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build Windows binary using cargo-dist
         shell: pwsh
         run: |
@@ -95,6 +96,9 @@ jobs:
           if (!(Test-Path "$dir\ferrum-chess.exe") -or !(Test-Path "$dir\stockfish.exe")) { throw 'Installed files missing' }
           $reply = @('uci', 'isready', 'quit') | & "$dir\stockfish.exe"
           if (($reply -join "`n") -notmatch 'readyok') { throw 'Installed Stockfish UCI smoke test failed' }
+          $env:FERRUM_STOCKFISH = "$dir\stockfish.exe"
+          cargo test --test game_flow stockfish_returns_a_legal_move_when_configured
+          if ($LASTEXITCODE -ne 0) { throw 'Installed Stockfish integration test failed' }
           $app = Start-Process "$dir\ferrum-chess.exe" -PassThru
           Start-Sleep -Seconds 5
           $app.Refresh()
@@ -115,7 +119,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "$env:GITHUB_REF_NAME" release/* --title "Ferrum Chess $env:VERSION" --generate-notes
+          $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
+          gh release create "$env:GITHUB_REF_NAME" @assets --verify-tag --title "Ferrum Chess $env:VERSION" --generate-notes
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
     permissions:
       contents: write

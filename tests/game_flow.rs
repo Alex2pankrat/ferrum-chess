@@ -84,3 +84,11 @@ fn stockfish_returns_a_legal_move_when_configured() {
     game.play_uci(&analysis.best_move)
         .expect("engine must return a legal move");
 }
+
+#[test]
+fn checkmate_exports_a_decisive_result() {
+    let game = Game::from_pgn(b"1. f3 e5 2. g4 Qh4# 0-1").expect("valid mate");
+    assert!(game.is_game_over());
+    assert_eq!(game.result(), "0-1");
+    assert!(game.to_pgn().contains("[Result \"0-1\"]"));
+}

@@ -23,13 +23,22 @@
         <Component Id="RulesLicenseComponent" Guid="12B201B0-AD43-4A15-AB06-C12D8F3B464E">
           <File Source="$(var.RulesLicense)" Name="shakmaty-GPL.txt" KeyPath="yes" />
         </Component>
+        <Component Id="ReadmeComponent" Guid="69EBA1B2-65BB-4C55-829D-55A3AF627545">
+          <File Source="$(var.Readme)" Name="README.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="MitComponent" Guid="3670A6AC-A75A-44E4-836A-6A7B355E34C5">
+          <File Source="$(var.MitLicense)" Name="LICENSE-MIT.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="ApacheComponent" Guid="5C6A75AA-C81D-4D80-9D4E-EF6B19581C67">
+          <File Source="$(var.ApacheLicense)" Name="LICENSE-APACHE.txt" KeyPath="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="Ferrum Chess" />
     </StandardDirectory>
     <Feature Id="Main" Title="Ferrum Chess" Level="1">
-      <ComponentRef Id="AppComponent" /><ComponentRef Id="EngineComponent" /><ComponentRef Id="LicenseComponent" /><ComponentRef Id="FontLicenseComponent" /><ComponentRef Id="RulesLicenseComponent" />
+      <ComponentRef Id="AppComponent" /><ComponentRef Id="EngineComponent" /><ComponentRef Id="LicenseComponent" /><ComponentRef Id="FontLicenseComponent" /><ComponentRef Id="RulesLicenseComponent" /><ComponentRef Id="ReadmeComponent" /><ComponentRef Id="MitComponent" /><ComponentRef Id="ApacheComponent" />
     </Feature>
   </Package>
 </Wix>

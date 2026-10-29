@@ -92,3 +92,34 @@ fn checkmate_exports_a_decisive_result() {
     assert_eq!(game.result(), "0-1");
     assert!(game.to_pgn().contains("[Result \"0-1\"]"));
 }
+
+#[test]
+fn application_self_test_reports_missing_engine() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ferrum-chess"))
+        .arg("--self-test")
+        .env(
+            "FERRUM_STOCKFISH",
+            "nonexistent-ferrum-stockfish-executable",
+        )
+        .output()
+        .expect("start self-test");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot start Stockfish"));
+}
+
+#[test]
+fn application_self_test_uses_real_engine_when_configured() {
+    if std::env::var_os("FERRUM_STOCKFISH").is_none() {
+        return;
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ferrum-chess"))
+        .arg("--self-test")
+        .output()
+        .expect("start self-test");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Self-test passed"));
+}

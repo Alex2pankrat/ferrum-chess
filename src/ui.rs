@@ -556,3 +556,68 @@ impl canvas::Program<Message> for Board<'_> {
         vec![frame.into_geometry()]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_coordinates_follow_player_orientation() {
+        let mut app = App::default();
+        let board = Board { app: &app };
+        assert_eq!(board.square(Point::new(0.0, 0.0)), Some(Square::A8));
+        assert_eq!(board.square(Point::new(511.0, 511.0)), Some(Square::H1));
+        assert_eq!(board.square(Point::new(512.0, 0.0)), None);
+        assert_eq!(board.square(Point::new(-1.0, 0.0)), None);
+        for square in [Square::A1, Square::E4, Square::H8] {
+            assert_eq!(board.square(board.center(square)), Some(square));
+        }
+        app.player = Player::Black;
+        let board = Board { app: &app };
+        assert_eq!(board.square(Point::new(0.0, 0.0)), Some(Square::H1));
+        assert_eq!(board.square(Point::new(511.0, 511.0)), Some(Square::A8));
+        for square in [Square::A1, Square::E4, Square::H8] {
+            assert_eq!(board.square(board.center(square)), Some(square));
+        }
+    }
+
+    #[test]
+    fn undo_takes_back_human_and_engine_moves_and_cancels_search() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        app.game.play_uci("e7e5").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.search_cancel = Some(Arc::clone(&cancel));
+        app.busy = true;
+        let old_generation = app.generation;
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.game.fen(), Game::default().fen());
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(!app.busy);
+        assert_ne!(app.generation, old_generation);
+        let _ = app.update(Message::Engine(old_generation, Err("stale".into())));
+        assert_eq!(app.notice, "Move undone");
+    }
+
+    #[test]
+    fn engine_reply_is_applied_and_error_is_shown() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        app.busy = true;
+        let _ = app.update(Message::Engine(
+            app.generation,
+            Ok(Analysis {
+                best_move: "e7e5".into(),
+                score: "0.00".into(),
+                depth: 4,
+            }),
+        ));
+        assert_eq!(app.game.moves(), ["e4", "e5"]);
+        assert!(!app.busy);
+        let _ = app.update(Message::Engine(
+            app.generation,
+            Err("engine unavailable".into()),
+        ));
+        assert_eq!(app.notice, "engine unavailable");
+    }
+}

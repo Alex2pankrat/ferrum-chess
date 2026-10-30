@@ -17,14 +17,17 @@ fn main() -> io::Result<()> {
     }
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
+    let mut received_history = false;
     for line in stdin.lock().lines() {
         let line = line?;
         if line == "uci" {
             writeln!(out, "id name Mock\nuciok")?;
         } else if line == "isready" {
             writeln!(out, "readyok")?;
+        } else if line.starts_with("position ") {
+            received_history = line.ends_with(" moves e2e4");
         } else if line.starts_with("go ") {
-            if name.contains("bad") {
+            if name.contains("bad") || (name.contains("history") && !received_history) {
                 writeln!(out, "info depth 4 score cp 25\nbestmove e7e4")?;
             } else {
                 writeln!(out, "info depth 4 score cp 25\nbestmove e7e5")?;

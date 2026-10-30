@@ -162,9 +162,54 @@ pub fn analyze_with_cancel(
     analyze_at(&engine_path(), &fen, depth, &cancel)
 }
 
-fn analyze_at(path: &Path, fen: &str, depth: u32, cancel: &AtomicBool) -> Result<Analysis, String> {
-    let board =
+/// Analyze a game from its initial FEN and validated UCI moves so the engine can detect repetitions.
+pub fn analyze_history_with_cancel(
+    initial_fen: String,
+    moves: Vec<String>,
+    depth: u32,
+    cancel: Arc<AtomicBool>,
+) -> Result<Analysis, String> {
+    analyze_history_at(&engine_path(), &initial_fen, &moves, depth, &cancel)
+}
+
+fn position_command(fen: &str, moves: &[String]) -> Result<(cozy_chess::Board, String), String> {
+    let mut board =
         cozy_chess::Board::from_fen(fen, false).map_err(|e| format!("Invalid position: {e}"))?;
+    let mut command = format!("position fen {board}");
+    if !moves.is_empty() {
+        command.push_str(" moves");
+    }
+    for text in moves {
+        if !text.is_ascii()
+            || !(text.len() == 4 || text.len() == 5)
+            || (text.len() == 5 && !matches!(text.as_bytes()[4], b'q' | b'r' | b'b' | b'n'))
+        {
+            return Err("Invalid UCI history move".into());
+        }
+        let mv = cozy_chess::util::parse_uci_move(&board, text)
+            .map_err(|_| "Invalid UCI history move")?;
+        if !board.is_legal(mv) {
+            return Err("Illegal UCI history move".into());
+        }
+        board.try_play(mv).map_err(|e| e.to_string())?;
+        command.push(' ');
+        command.push_str(text);
+    }
+    Ok((board, command))
+}
+
+fn analyze_at(path: &Path, fen: &str, depth: u32, cancel: &AtomicBool) -> Result<Analysis, String> {
+    analyze_history_at(path, fen, &[], depth, cancel)
+}
+
+fn analyze_history_at(
+    path: &Path,
+    fen: &str,
+    moves: &[String],
+    depth: u32,
+    cancel: &AtomicBool,
+) -> Result<Analysis, String> {
+    let (board, position) = position_command(fen, moves)?;
     if !(1..=32).contains(&depth) {
         return Err("Search depth must be between 1 and 32".into());
     }
@@ -176,7 +221,7 @@ fn analyze_at(path: &Path, fen: &str, depth: u32, cancel: &AtomicBool) -> Result
     engine.wait_for("uciok", cancel)?;
     engine.send("isready")?;
     engine.wait_for("readyok", cancel)?;
-    engine.send(&format!("position fen {fen}"))?;
+    engine.send(&position)?;
     // Use a time limit as well as depth so a difficult position cannot run forever.
     engine.send(&format!("go depth {depth} movetime 15000"))?;
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -256,6 +301,32 @@ mod tests {
             .expect("compile fake UCI engine");
         assert!(status.success());
         path
+    }
+
+    #[test]
+    fn uci_position_preserves_history_and_rejects_invalid_input() {
+        let fen = cozy_chess::Board::default().to_string();
+        let moves = vec!["e2e4".to_owned(), "e7e5".to_owned()];
+        let (board, command) = position_command(&fen, &moves).unwrap();
+        assert_eq!(board.side_to_move(), cozy_chess::Color::White);
+        assert!(command.ends_with(" moves e2e4 e7e5"));
+        assert!(position_command(&fen, &["e2e4\nquit".into()]).is_err());
+        assert!(position_command(&fen, &["e2e5".into()]).is_err());
+    }
+
+    #[test]
+    fn protocol_sends_complete_validated_history() {
+        let path = fake_engine("history");
+        let result = analyze_history_at(
+            &path,
+            &cozy_chess::Board::default().to_string(),
+            &["e2e4".into()],
+            4,
+            &AtomicBool::new(false),
+        )
+        .expect("history-aware response");
+        assert_eq!(result.best_move, "e7e5");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

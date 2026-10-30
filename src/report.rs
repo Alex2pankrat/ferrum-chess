@@ -81,8 +81,9 @@ pub fn analyze_game_with_cancel(
         let evaluation = if position.is_game_over() {
             None
         } else {
-            Some(engine::analyze_with_cancel(
-                position.fen(),
+            Some(engine::analyze_history_with_cancel(
+                position.initial_fen(),
+                position.uci_moves(),
                 depth,
                 Arc::clone(&cancel),
             )?)

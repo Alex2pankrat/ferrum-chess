@@ -79,8 +79,8 @@ jobs:
         run: |
           # Do not let the test-only override hide a broken adjacent-engine lookup.
           Remove-Item Env:FERRUM_STOCKFISH -ErrorAction SilentlyContinue
-          & ./stage/ferrum-chess.exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw 'Portable application self-test failed' }
+          $p = Start-Process ./stage/ferrum-chess.exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Portable application self-test failed: $($p.ExitCode)" }
       - name: Package portable app and engine source
         shell: pwsh
         run: |
@@ -122,7 +122,7 @@ jobs:
           $escaped = $notice.Replace('\', '\\').Replace('{', '\{').Replace('}', '\}').Replace("`r`n", "`n").Replace("`n", "\par`n")
           $rtf = '{\rtf1\ansi\deff0 {\fonttbl{\f0 Arial;}}\f0\fs18 ' + $escaped + '}'
           [IO.File]::WriteAllText("$pwd\stage\licenses.rtf", $rtf, [Text.Encoding]::ASCII)
-          wix build -arch x64 -ext WixToolset.UI.wixext -d "Version=$env:VERSION" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "PieceNotice=$pwd\stage\Chess-Pieces-Public-Domain.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" -d "LicenseRtf=$pwd\stage\licenses.rtf" wix/main.wxs -o release/ferrum-chess-x64.msi
+          wix build -arch x64 -ext WixToolset.UI.wixext -d "Version=$env:VERSION" -d "AppIcon=$pwd\assets\ferrum-icon.ico" -d "AppPath=$pwd\stage\ferrum-chess.exe" -d "EnginePath=$pwd\stage\stockfish.exe" -d "StockfishLicense=$pwd\stage\Stockfish-GPL.txt" -d "FontLicense=$pwd\assets\OFL.txt" -d "PieceNotice=$pwd\stage\Chess-Pieces-Public-Domain.txt" -d "Readme=$pwd\README.md" -d "MitLicense=$pwd\LICENSE-MIT" -d "ApacheLicense=$pwd\LICENSE-APACHE" -d "LicenseRtf=$pwd\stage\licenses.rtf" wix/main.wxs -o release/ferrum-chess-x64.msi
           if ($LASTEXITCODE -ne 0) { throw 'WiX build failed' }
       - name: Verify MSI wizard dialogs and UI sequence
         shell: pwsh
@@ -130,30 +130,51 @@ jobs:
           $msi = (Resolve-Path release/ferrum-chess-x64.msi).Path
           $installer = New-Object -ComObject WindowsInstaller.Installer
           $db = $installer.OpenDatabase($msi, 0)
-          foreach ($dialog in @('WelcomeEulaDlg', 'ProgressDlg', 'ExitDialog', 'FatalError')) {
+          foreach ($dialog in @('DesktopShortcutDlg', 'WelcomeEulaDlg', 'ProgressDlg', 'ExitDialog', 'FatalError')) {
             $sql = 'SELECT `Dialog` FROM `Dialog` WHERE `Dialog` = ' + "'" + $dialog + "'"
             $view = $db.OpenView($sql)
             $view.Execute()
             if (!$view.Fetch()) { throw "Missing MSI dialog: $dialog" }
             $view.Close()
           }
-          foreach ($action in @('WelcomeEulaDlg', 'ExitDialog')) {
+          foreach ($action in @('DesktopShortcutDlg', 'WelcomeEulaDlg', 'ExitDialog')) {
             $sql = 'SELECT `Action` FROM `InstallUISequence` WHERE `Action` = ' + "'" + $action + "'"
             $view = $db.OpenView($sql)
             $view.Execute()
             if (!$view.Fetch()) { throw "Missing MSI UI action: $action" }
             $view.Close()
           }
+      - name: Check Windows GUI subsystem and executable icon
+        shell: pwsh
+        run: |
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path stage/ferrum-chess.exe).Path)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw 'Invalid PE signature' }
+          if ([BitConverter]::ToUInt16($bytes, $pe + 24 + 68) -ne 2) { throw 'Executable is not a Windows GUI subsystem application' }
+          Add-Type -AssemblyName System.Drawing
+          $icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path stage/ferrum-chess.exe).Path)
+          if (!$icon) { throw 'Executable has no associated icon' }
+          $icon.Dispose()
+      - name: Verify desktop shortcut installer configuration
+        shell: pwsh
+        run: |
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.OpenDatabase((Resolve-Path release/ferrum-chess-x64.msi).Path, 0)
+          $view = $db.OpenView("SELECT ``Property`` FROM ``Control`` WHERE ``Dialog_`` = 'DesktopShortcutDlg' AND ``Control`` = 'DesktopCheckbox'")
+          $view.Execute()
+          $record = $view.Fetch()
+          if (!$record -or $record.StringData(1) -ne 'DESKTOPSHORTCUT') { throw 'Desktop shortcut checkbox is not configured' }
+          $view.Close()
       - name: Smoke-test install, engine and uninstall
         shell: pwsh
         run: |
-          # Verify that the new installer upgrades the previously published 0.1.0 MSI.
-          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.1.0/ferrum-chess-x64.msi' -OutFile old-version.msi
+          # Verify that the new installer upgrades the previously published 0.2.0 MSI.
+          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.2.0/ferrum-chess-x64.msi' -OutFile old-version.msi
           $oldMsi = (Resolve-Path old-version.msi).Path
           $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$oldMsi`"", '/qn', '/norestart') -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Previous MSI install failed: $($p.ExitCode)" }
           $msi = (Resolve-Path release/ferrum-chess-x64.msi).Path
-          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", 'DESKTOPSHORTCUT=1', '/qn', '/norestart') -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "MSI install failed: $($p.ExitCode)" }
           $installed = @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'Ferrum Chess')
           if ($installed.Count -ne 1 -or $installed[0].DisplayVersion -ne $env:VERSION) { throw 'MSI upgrade did not replace the previous version' }
@@ -161,14 +182,18 @@ jobs:
           if (!(Test-Path "$dir\ferrum-chess.exe") -or !(Test-Path "$dir\stockfish.exe")) { throw 'Installed files missing' }
           $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Ferrum Chess\Ferrum Chess.lnk'
           if (!(Test-Path $shortcut)) { throw "Start menu shortcut missing: $shortcut" }
+          $desktop = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Ferrum Chess.lnk'
+          if (!(Test-Path $desktop)) { throw 'Selected desktop shortcut missing' }
+          $link = (New-Object -ComObject WScript.Shell).CreateShortcut($desktop)
+          if ($link.TargetPath -ine "$dir\ferrum-chess.exe") { throw "Desktop shortcut target is wrong: $($link.TargetPath)" }
           $reply = @('uci', 'isready', 'quit') | & "$dir\stockfish.exe"
           if (($reply -join "`n") -notmatch 'readyok') { throw 'Installed Stockfish UCI smoke test failed' }
           $env:FERRUM_STOCKFISH = "$dir\stockfish.exe"
           cargo test --test game_flow stockfish_returns_a_legal_move_when_configured
           if ($LASTEXITCODE -ne 0) { throw 'Installed Stockfish integration test failed' }
           Remove-Item Env:FERRUM_STOCKFISH -ErrorAction SilentlyContinue
-          & "$dir\ferrum-chess.exe" --self-test
-          if ($LASTEXITCODE -ne 0) { throw 'Installed app self-test with adjacent Stockfish failed' }
+          $p = Start-Process "$dir\ferrum-chess.exe" -ArgumentList '--self-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installed app self-test with adjacent Stockfish failed: $($p.ExitCode)" }
           foreach ($file in @('LICENSE-MIT.txt', 'LICENSE-APACHE.txt', 'Stockfish-GPL.txt', 'Noto-OFL.txt', 'Chess-Pieces-Public-Domain.txt')) {
             if (!(Test-Path (Join-Path $dir $file))) { throw "Installed license missing: $file" }
           }
@@ -183,6 +208,13 @@ jobs:
             if (Test-Path (Join-Path $dir $file)) { throw "File remains after uninstall: $file" }
           }
           if (Test-Path $shortcut) { throw 'Start menu shortcut remains after uninstall' }
+          if (Test-Path $desktop) { throw 'Desktop shortcut remains after uninstall' }
+          # Silent install without the option must not create a desktop shortcut.
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Default MSI install failed: $($p.ExitCode)" }
+          if (Test-Path $desktop) { throw 'Desktop shortcut was created without opting in' }
+          $p = Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Default MSI uninstall failed: $($p.ExitCode)" }
       - name: Create and verify SHA-256 checksums
         shell: pwsh
         run: |

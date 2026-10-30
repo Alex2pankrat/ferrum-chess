@@ -8,12 +8,31 @@
          Silent installs (/qn) continue to work without UI. -->
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <Icon Id="FerrumIcon" SourceFile="$(var.AppIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="FerrumIcon" />
+    <Property Id="DESKTOPSHORTCUT" Secure="yes" />
+    <UI>
+      <Dialog Id="DesktopShortcutDlg" Width="370" Height="270" Title="Ferrum Chess Setup">
+        <Control Id="Heading" Type="Text" X="20" Y="25" Width="330" Height="25" Text="Choose shortcuts" />
+        <Control Id="Explanation" Type="Text" X="20" Y="60" Width="330" Height="35" Text="Ferrum Chess will be available in the Start menu. You can also add a shortcut to the desktop." />
+        <Control Id="DesktopCheckbox" Type="CheckBox" X="20" Y="110" Width="320" Height="20" Property="DESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a desktop shortcut" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+    </UI>
+    <InstallUISequence>
+      <Show Dialog="DesktopShortcutDlg" Before="WelcomeEulaDlg" Condition="NOT Installed" />
+    </InstallUISequence>
     <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="Open Ferrum Chess from the Start menu after installation." />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Ferrum Chess">
         <Component Id="AppComponent" Guid="22C07355-BD58-42BD-9A67-0B27AFF5EFC0">
           <File Id="AppFile" Source="$(var.AppPath)" KeyPath="yes">
-            <Shortcut Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Name="Ferrum Chess" WorkingDirectory="INSTALLFOLDER" Advertise="yes" />
+            <Shortcut Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Name="Ferrum Chess" WorkingDirectory="INSTALLFOLDER" Icon="FerrumIcon" Advertise="yes" />
           </File>
         </Component>
         <Component Id="EngineComponent" Guid="511E073C-B7E8-4D85-9536-DA764A0D1C93">
@@ -39,11 +58,17 @@
         </Component>
       </Directory>
     </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="9982524F-19D9-4B6E-8954-B221F7148F3D" Condition="DESKTOPSHORTCUT = 1">
+        <Shortcut Id="DesktopShortcut" Name="Ferrum Chess" Target="[#AppFile]" WorkingDirectory="INSTALLFOLDER" Icon="FerrumIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Ferrum Chess" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="Ferrum Chess" />
     </StandardDirectory>
     <Feature Id="Main" Title="Ferrum Chess" Level="1">
-      <ComponentRef Id="AppComponent" /><ComponentRef Id="EngineComponent" /><ComponentRef Id="LicenseComponent" /><ComponentRef Id="FontLicenseComponent" /><ComponentRef Id="PieceNoticeComponent" /><ComponentRef Id="ReadmeComponent" /><ComponentRef Id="MitComponent" /><ComponentRef Id="ApacheComponent" />
+      <ComponentRef Id="AppComponent" /><ComponentRef Id="DesktopShortcutComponent" /><ComponentRef Id="EngineComponent" /><ComponentRef Id="LicenseComponent" /><ComponentRef Id="FontLicenseComponent" /><ComponentRef Id="PieceNoticeComponent" /><ComponentRef Id="ReadmeComponent" /><ComponentRef Id="MitComponent" /><ComponentRef Id="ApacheComponent" />
     </Feature>
   </Package>
 </Wix>

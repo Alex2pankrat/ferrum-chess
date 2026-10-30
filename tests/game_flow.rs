@@ -134,3 +134,28 @@ fn review_positions_preserve_the_original_and_number_black_to_move() {
     assert_eq!(game.moves(), ["Kg7", "Kf4"]);
     assert!(game.at_ply(3).is_none());
 }
+
+#[test]
+fn full_game_review_with_stockfish_when_configured() {
+    if std::env::var_os("FERRUM_STOCKFISH").is_none() {
+        return;
+    }
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut game = Game::default();
+    game.play_uci("e2e4").unwrap();
+    game.play_uci("e7e5").unwrap();
+    let progress = Arc::new(AtomicUsize::new(0));
+    let report = ferrum_chess::report::analyze_game_with_cancel(
+        &game,
+        4,
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&progress),
+    )
+    .expect("complete game review");
+    assert_eq!(report.moves.len(), 2);
+    assert_eq!(report.moves[0].label, "1. e4");
+    assert_eq!(progress.load(Ordering::Relaxed), 3);
+}

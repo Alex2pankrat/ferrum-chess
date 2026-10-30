@@ -58,6 +58,13 @@ impl Game {
     pub fn moves(&self) -> Vec<String> {
         self.history.iter().map(|entry| entry.1.clone()).collect()
     }
+    /// UCI moves for the original main line, with standard castling notation.
+    pub fn uci_moves(&self) -> Vec<String> {
+        self.history
+            .iter()
+            .map(|(board, _, mv)| display_uci_move(board, *mv).to_string())
+            .collect()
+    }
     /// Return a copy at a prior ply without changing the original game.
     pub fn at_ply(&self, ply: usize) -> Option<Self> {
         if ply > self.history.len() {

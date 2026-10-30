@@ -4,6 +4,7 @@ use cozy_chess::{Color as Side, Piece as Role, Square};
 use ferrum_chess::{
     engine::{self, Analysis},
     game::Game,
+    report::{self, GameReport},
 };
 use iced::{
     futures::channel::oneshot,
@@ -13,12 +14,12 @@ use iced::{
         canvas::{self, Canvas, Frame, Geometry, Path, Stroke},
         checkbox, column, container, pick_list, responsive, row, scrollable, svg, text, text_input,
     },
-    Color, Element, Length, Point, Rectangle, Renderer, Size, Task, Theme,
+    Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
 };
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, OnceLock,
     },
 };
@@ -26,6 +27,7 @@ use std::{
 pub fn run() -> iced::Result {
     iced::application(App::default, App::update, App::view)
         .title("Ferrum Chess")
+        .subscription(App::subscription)
         .theme(Theme::custom(
             "Ferrum",
             iced::theme::Palette {
@@ -123,6 +125,8 @@ struct App {
     depth: u32,
     selected: Option<Square>,
     analysis: Option<Analysis>,
+    game_report: Option<GameReport>,
+    report_progress: Option<Arc<AtomicUsize>>,
     busy: bool,
     search_cancel: Option<Arc<AtomicBool>>,
     generation: u64,
@@ -144,6 +148,8 @@ impl Default for App {
             depth: 10,
             selected: None,
             analysis: None,
+            game_report: None,
+            report_progress: None,
             busy: false,
             search_cancel: None,
             generation: 0,
@@ -172,6 +178,11 @@ enum Message {
     Reset,
     Undo,
     Analyze,
+    AnalyzeGame,
+    CancelAnalysis,
+    ReportTick,
+    ReportMove(usize),
+    Report(u64, Result<GameReport, String>),
     Engine(u64, Result<Analysis, String>),
     Open,
     Save,
@@ -201,9 +212,38 @@ impl App {
         }
         self.generation = self.generation.wrapping_add(1);
         self.busy = false;
+        self.report_progress = None;
         self.analysis = None;
         self.selected = None;
         self.pending_promotion = None;
+    }
+    fn subscription(&self) -> Subscription<Message> {
+        if self.report_progress.is_some() {
+            iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::ReportTick)
+        } else {
+            Subscription::none()
+        }
+    }
+    fn analyze_game(&mut self) -> Task<Message> {
+        let game = self.review.clone().unwrap_or_else(|| self.game.clone());
+        if game.moves().is_empty() {
+            self.notice = "Play or load a game before analyzing it".into();
+            return Task::none();
+        }
+        self.invalidate();
+        self.game_report = None;
+        self.busy = true;
+        self.notice = "Analyzing every position with Stockfish…".into();
+        let generation = self.generation;
+        let depth = self.depth;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicUsize::new(0));
+        self.search_cancel = Some(Arc::clone(&cancel));
+        self.report_progress = Some(Arc::clone(&progress));
+        Task::perform(
+            worker(move || report::analyze_game_with_cancel(&game, depth, cancel, progress)),
+            move |result| Message::Report(generation, result.and_then(std::convert::identity)),
+        )
     }
     fn search(&mut self) -> Task<Message> {
         if self.game.is_game_over() {
@@ -252,6 +292,7 @@ impl App {
         match self.game.play(from, to, promotion) {
             Ok(()) => {
                 self.review = None;
+                self.game_report = None;
                 self.invalidate();
                 self.notice = format!("{:?} to move", self.game.position.side_to_move());
                 self.maybe_search()
@@ -296,6 +337,7 @@ impl App {
                 self.player = player;
                 self.flipped = player == Player::Black;
                 self.game = Game::default();
+                self.game_report = None;
                 self.review = None;
                 self.invalidate();
                 return self.maybe_search();
@@ -355,6 +397,7 @@ impl App {
                         match self.game.play_uci(&input) {
                             Ok(()) => {
                                 self.move_input.clear();
+                                self.game_report = None;
                                 self.review = None;
                                 self.invalidate();
                                 self.notice =
@@ -392,12 +435,14 @@ impl App {
             Message::Flip => self.flipped = !self.flipped,
             Message::New => {
                 self.game = Game::default();
+                self.game_report = None;
                 self.review = None;
                 self.invalidate();
                 return self.maybe_search();
             }
             Message::Reset => {
                 self.game.reset();
+                self.game_report = None;
                 self.review = None;
                 self.invalidate();
                 return self.maybe_search();
@@ -406,6 +451,7 @@ impl App {
                 if self.review.is_some() {
                     return self.update(Message::Review(self.game.moves().len().saturating_sub(1)));
                 }
+                self.game_report = None;
                 self.invalidate();
                 if self.game.undo()
                     && self.mode == Mode::Play
@@ -419,6 +465,43 @@ impl App {
             Message::Analyze => {
                 self.invalidate();
                 return self.search();
+            }
+            Message::AnalyzeGame => return self.analyze_game(),
+            Message::CancelAnalysis => {
+                self.invalidate();
+                self.notice = "Analysis cancelled".into();
+            }
+            Message::ReportTick => {}
+            Message::ReportMove(index) => {
+                if let Some(entry) = self
+                    .game_report
+                    .as_ref()
+                    .and_then(|report| report.moves.get(index))
+                    .cloned()
+                {
+                    let task = self.update(Message::Review(index));
+                    self.analysis = Some(entry.before);
+                    self.notice = format!(
+                        "{}: {}. Best move shown on the board.",
+                        entry.label, entry.classification
+                    );
+                    return task;
+                }
+            }
+            Message::Report(generation, result) => {
+                if generation != self.generation {
+                    return Task::none();
+                }
+                self.busy = false;
+                self.search_cancel = None;
+                self.report_progress = None;
+                match result {
+                    Ok(report) => {
+                        self.notice = format!("Game review complete: {} moves", report.moves.len());
+                        self.game_report = Some(report);
+                    }
+                    Err(error) => self.notice = error,
+                }
             }
             Message::Engine(generation, result) => {
                 if generation != self.generation {
@@ -436,6 +519,7 @@ impl App {
                             && self.game.position.side_to_move() != self.player.side()
                             && self.review.is_none()
                         {
+                            self.game_report = None;
                             if let Err(e) = self.game.play_uci(&analysis.best_move) {
                                 self.notice = e;
                             } else if self.game.is_game_over() {
@@ -475,6 +559,7 @@ impl App {
                 match result {
                     Ok(Some(game)) => {
                         self.game = *game;
+                        self.game_report = None;
                         self.review = None;
                         self.invalidate();
                         self.notice = "PGN loaded".into();
@@ -829,6 +914,67 @@ impl App {
                     .padding(12)
                     .width(Length::Fill)
                     .style(card_style),
+                if let Some(progress) = &self.report_progress {
+                    column![
+                        text(format!(
+                            "Reviewing positions: {} / {}",
+                            progress.load(Ordering::Relaxed),
+                            total_moves + 1
+                        ))
+                        .size(12)
+                        .color(muted()),
+                        button("Cancel game review")
+                            .on_press(Message::CancelAnalysis)
+                            .style(button::secondary),
+                    ]
+                    .spacing(6)
+                    .into()
+                } else {
+                    button("Analyze entire game")
+                        .on_press(Message::AnalyzeGame)
+                        .style(button::secondary)
+                        .into()
+                },
+                if let Some(report) = &self.game_report {
+                    let entries: Vec<Element<'_, Message>> = report
+                        .moves
+                        .iter()
+                        .enumerate()
+                        .map(|(index, review)| {
+                            let loss = review
+                                .centipawn_loss
+                                .map(|v| format!(" · {v} cp"))
+                                .unwrap_or_default();
+                            button(
+                                text(format!(
+                                    "{}  ·  {}{}",
+                                    review.label, review.classification, loss
+                                ))
+                                .size(13)
+                                .width(Length::Fill),
+                            )
+                            .on_press(Message::ReportMove(index))
+                            .style(button::text)
+                            .width(Length::Fill)
+                            .padding([5, 6])
+                            .into()
+                        })
+                        .collect();
+                    column![
+                        text("GAME REVIEW").size(11).color(muted()),
+                        text("Approximate engine evaluation • select a move to inspect")
+                            .size(11)
+                            .color(muted()),
+                        container(scrollable(column(entries)).height(160))
+                            .padding(8)
+                            .width(Length::Fill)
+                            .style(card_style),
+                    ]
+                    .spacing(6)
+                    .into()
+                } else {
+                    iced::widget::space().height(0).into()
+                },
                 row![
                     button("Open PGN")
                         .on_press(Message::Open)
@@ -1371,6 +1517,42 @@ mod tests {
         ));
         assert!(!state.dragging);
         assert!(state.pressed.is_none());
+    }
+
+    #[test]
+    fn game_report_review_and_cancellation_keep_position_safe() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        app.game.play_uci("e7e5").unwrap();
+        let final_fen = app.game.fen();
+        app.game_report = Some(GameReport {
+            moves: vec![report::MoveReview {
+                label: "1. e4".into(),
+                before: Analysis {
+                    best_move: "d2d4".into(),
+                    score: "25 cp".into(),
+                    depth: 4,
+                },
+                classification: "Good",
+                centipawn_loss: Some(12),
+            }],
+        });
+        let _ = app.update(Message::ReportMove(0));
+        assert_eq!(app.game.fen(), Game::default().fen());
+        assert_eq!(app.analysis.as_ref().unwrap().best_move, "d2d4");
+        assert!(app.game_report.is_some());
+        let _ = app.update(Message::Review(2));
+        assert_eq!(app.game.fen(), final_fen);
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.search_cancel = Some(Arc::clone(&cancel));
+        app.report_progress = Some(Arc::new(AtomicUsize::new(1)));
+        app.busy = true;
+        let _ = app.update(Message::CancelAnalysis);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(app.report_progress.is_none());
+        assert!(!app.busy);
+        let _ = app.update(Message::New);
+        assert!(app.game_report.is_none());
     }
 
     #[test]

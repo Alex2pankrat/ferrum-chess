@@ -781,6 +781,67 @@ impl App {
         } else {
             "READY"
         };
+        let review_control: Element<'_, Message> = if let Some(progress) = &self.report_progress {
+            column![
+                text(format!(
+                    "Reviewing positions: {} / {}",
+                    progress.load(Ordering::Relaxed),
+                    total_moves + 1
+                ))
+                .size(12)
+                .color(muted()),
+                button("Cancel game review")
+                    .on_press(Message::CancelAnalysis)
+                    .style(button::secondary),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            button("Analyze entire game")
+                .on_press(Message::AnalyzeGame)
+                .style(button::secondary)
+                .into()
+        };
+        let review_details: Element<'_, Message> = if let Some(report) = &self.game_report {
+            let entries: Vec<Element<'_, Message>> = report
+                .moves
+                .iter()
+                .enumerate()
+                .map(|(index, review)| {
+                    let loss = review
+                        .centipawn_loss
+                        .map(|v| format!(" · {v} cp"))
+                        .unwrap_or_default();
+                    button(
+                        text(format!(
+                            "{}  ·  {}{}",
+                            review.label, review.classification, loss
+                        ))
+                        .size(13)
+                        .width(Length::Fill),
+                    )
+                    .on_press(Message::ReportMove(index))
+                    .style(button::text)
+                    .width(Length::Fill)
+                    .padding([5, 6])
+                    .into()
+                })
+                .collect();
+            column![
+                text("GAME REVIEW").size(11).color(muted()),
+                text("Approximate engine evaluation • select a move to inspect")
+                    .size(11)
+                    .color(muted()),
+                container(scrollable(column(entries)).height(160))
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(card_style),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            iced::widget::space().height(0).into()
+        };
         let panel: Element<'_, Message> = if self.settings_open {
             column![
                 text("Appearance").size(24),
@@ -914,67 +975,8 @@ impl App {
                     .padding(12)
                     .width(Length::Fill)
                     .style(card_style),
-                if let Some(progress) = &self.report_progress {
-                    column![
-                        text(format!(
-                            "Reviewing positions: {} / {}",
-                            progress.load(Ordering::Relaxed),
-                            total_moves + 1
-                        ))
-                        .size(12)
-                        .color(muted()),
-                        button("Cancel game review")
-                            .on_press(Message::CancelAnalysis)
-                            .style(button::secondary),
-                    ]
-                    .spacing(6)
-                    .into()
-                } else {
-                    button("Analyze entire game")
-                        .on_press(Message::AnalyzeGame)
-                        .style(button::secondary)
-                        .into()
-                },
-                if let Some(report) = &self.game_report {
-                    let entries: Vec<Element<'_, Message>> = report
-                        .moves
-                        .iter()
-                        .enumerate()
-                        .map(|(index, review)| {
-                            let loss = review
-                                .centipawn_loss
-                                .map(|v| format!(" · {v} cp"))
-                                .unwrap_or_default();
-                            button(
-                                text(format!(
-                                    "{}  ·  {}{}",
-                                    review.label, review.classification, loss
-                                ))
-                                .size(13)
-                                .width(Length::Fill),
-                            )
-                            .on_press(Message::ReportMove(index))
-                            .style(button::text)
-                            .width(Length::Fill)
-                            .padding([5, 6])
-                            .into()
-                        })
-                        .collect();
-                    column![
-                        text("GAME REVIEW").size(11).color(muted()),
-                        text("Approximate engine evaluation • select a move to inspect")
-                            .size(11)
-                            .color(muted()),
-                        container(scrollable(column(entries)).height(160))
-                            .padding(8)
-                            .width(Length::Fill)
-                            .style(card_style),
-                    ]
-                    .spacing(6)
-                    .into()
-                } else {
-                    iced::widget::space().height(0).into()
-                },
+                review_control,
+                review_details,
                 row![
                     button("Open PGN")
                         .on_press(Message::Open)

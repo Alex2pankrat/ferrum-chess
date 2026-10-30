@@ -49,9 +49,31 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        shell: pwsh
+        run: |
+          $lines = @(cargo clippy --all-targets -- -D warnings 2>&1)
+          $code = $LASTEXITCODE
+          $lines | ForEach-Object { Write-Output "$_" }
+          if ($code -ne 0) {
+            $lines | Select-Object -Last 100 | ForEach-Object {
+              $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error::$message"
+            }
+            exit $code
+          }
       - name: Unit and integration tests, including Stockfish
-        run: cargo test --all-targets
+        shell: pwsh
+        run: |
+          $lines = @(cargo test --all-targets 2>&1)
+          $code = $LASTEXITCODE
+          $lines | ForEach-Object { Write-Output "$_" }
+          if ($code -ne 0) {
+            $lines | Select-Object -Last 100 | ForEach-Object {
+              $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error::$message"
+            }
+            exit $code
+          }
       - name: Install cargo-dist and WiX
         shell: pwsh
         run: |

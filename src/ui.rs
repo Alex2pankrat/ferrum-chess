@@ -56,6 +56,7 @@ pub fn run() -> iced::Result {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Play,
+    Local,
     Analysis,
 }
 impl fmt::Display for Mode {
@@ -65,6 +66,7 @@ impl fmt::Display for Mode {
             "{}",
             match self {
                 Self::Play => "Play Stockfish",
+                Self::Local => "Local game",
                 Self::Analysis => "Analysis",
             }
         )
@@ -111,6 +113,12 @@ impl Promotion {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirmation {
+    Resign(Side),
+    AgreeDraw,
+}
+
 struct App {
     game: Game,
     mode: Mode,
@@ -122,6 +130,8 @@ struct App {
     pending_promotion: Option<(Square, Square)>,
     review: Option<Game>,
     move_input: String,
+    fen_input: String,
+    confirmation: Option<Confirmation>,
     depth: u32,
     selected: Option<Square>,
     analysis: Option<Analysis>,
@@ -145,6 +155,8 @@ impl Default for App {
             pending_promotion: None,
             review: None,
             move_input: String::new(),
+            fen_input: String::new(),
+            confirmation: None,
             depth: 10,
             selected: None,
             analysis: None,
@@ -172,6 +184,14 @@ enum Message {
     Coordinates(bool),
     MoveTextChanged(String),
     SubmitMove,
+    FenChanged(String),
+    LoadFen,
+    CopyFen,
+    RequestResign,
+    RequestDraw,
+    ConfirmResult,
+    CancelResult,
+    ClaimRepetition,
     Review(usize),
     Flip,
     New,
@@ -216,6 +236,7 @@ impl App {
         self.analysis = None;
         self.selected = None;
         self.pending_promotion = None;
+        self.confirmation = None;
     }
     fn subscription(&self) -> Subscription<Message> {
         if self.report_progress.is_some() {
@@ -258,17 +279,24 @@ impl App {
         self.busy = true;
         self.notice = "Stockfish is thinking…".into();
         let generation = self.generation;
-        let fen = self.game.fen();
+        let fen = self.game.initial_fen();
+        let moves = self.game.uci_moves();
         let depth = self.depth;
         let cancel = Arc::new(AtomicBool::new(false));
         self.search_cancel = Some(Arc::clone(&cancel));
         Task::perform(
-            worker(move || engine::analyze_with_cancel(fen, depth, cancel)),
+            worker(move || engine::analyze_history_with_cancel(fen, moves, depth, cancel)),
             move |result| Message::Engine(generation, result.and_then(std::convert::identity)),
         )
     }
     fn maybe_search(&mut self) -> Task<Message> {
-        if self.mode == Mode::Analysis || self.game.position.side_to_move() != self.player.side() {
+        if self.game.is_game_over() {
+            self.notice = format!("Game over: {}", self.game.result());
+            return Task::none();
+        }
+        if self.mode == Mode::Analysis
+            || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
+        {
             self.search()
         } else {
             Task::none()
@@ -277,6 +305,8 @@ impl App {
     fn move_piece(&mut self, from: Square, to: Square) -> Task<Message> {
         if self.busy
             || self.pending_promotion.is_some()
+            || self.confirmation.is_some()
+            || self.game.is_game_over()
             || self.review.is_some()
             || (self.mode == Mode::Play && self.game.position.side_to_move() != self.player.side())
         {
@@ -318,6 +348,8 @@ impl App {
             Message::Click(square) => {
                 if self.busy
                     || self.pending_promotion.is_some()
+                    || self.confirmation.is_some()
+                    || self.game.is_game_over()
                     || self.review.is_some()
                     || (self.mode == Mode::Play
                         && self.game.position.side_to_move() != self.player.side())
@@ -378,6 +410,7 @@ impl App {
             Message::SubmitMove => {
                 if self.busy
                     || self.pending_promotion.is_some()
+                    || self.confirmation.is_some()
                     || self.review.is_some()
                     || self.game.is_game_over()
                     || (self.mode == Mode::Play
@@ -416,6 +449,77 @@ impl App {
                     }
                 } else {
                     self.notice = "Enter a move like e2e4 or e7e8q".into();
+                }
+            }
+            Message::FenChanged(value) => self.fen_input = value,
+            Message::LoadFen => match Game::from_fen(&self.fen_input) {
+                Ok(game) => {
+                    self.game = game;
+                    self.game_report = None;
+                    self.review = None;
+                    self.invalidate();
+                    self.notice = "FEN loaded as a new game".into();
+                    return self.maybe_search();
+                }
+                Err(error) => self.notice = error,
+            },
+            Message::CopyFen => {
+                self.notice = "Position FEN copied".into();
+                return iced::clipboard::write(self.game.fen());
+            }
+            Message::RequestResign | Message::RequestDraw => {
+                if self.busy
+                    || self.pending_promotion.is_some()
+                    || self.review.is_some()
+                    || self.game.is_game_over()
+                {
+                    self.notice = "Cannot end the game right now".into();
+                } else if matches!(message, Message::RequestDraw) {
+                    if self.mode == Mode::Local {
+                        self.confirmation = Some(Confirmation::AgreeDraw);
+                    }
+                } else if self.mode != Mode::Analysis {
+                    let side = if self.mode == Mode::Play {
+                        self.player.side()
+                    } else {
+                        self.game.position.side_to_move()
+                    };
+                    self.confirmation = Some(Confirmation::Resign(side));
+                }
+            }
+            Message::CancelResult => self.confirmation = None,
+            Message::ConfirmResult => {
+                let action = self.confirmation.take();
+                let result = match action {
+                    Some(Confirmation::Resign(side)) => self.game.resign(side),
+                    Some(Confirmation::AgreeDraw) => self.game.agree_draw(),
+                    None => return Task::none(),
+                };
+                match result {
+                    Ok(()) => {
+                        self.game_report = None;
+                        self.invalidate();
+                        self.notice = format!("Game over: {}", self.game.result());
+                    }
+                    Err(error) => self.notice = error,
+                }
+            }
+            Message::ClaimRepetition => {
+                if self.busy
+                    || self.pending_promotion.is_some()
+                    || self.review.is_some()
+                    || self.confirmation.is_some()
+                {
+                    self.notice = "Cannot claim a draw right now".into();
+                } else {
+                    match self.game.claim_repetition() {
+                        Ok(()) => {
+                            self.game_report = None;
+                            self.invalidate();
+                            self.notice = "Draw claimed by threefold repetition".into();
+                        }
+                        Err(error) => self.notice = error,
+                    }
                 }
             }
             Message::Review(ply) => {
@@ -458,7 +562,9 @@ impl App {
                 }
                 self.game_report = None;
                 self.invalidate();
+                let had_adjudication = self.game.has_adjudication();
                 if self.game.undo()
+                    && !had_adjudication
                     && self.mode == Mode::Play
                     && self.game.position.side_to_move() != self.player.side()
                 {
@@ -612,6 +718,7 @@ impl App {
         }
         .max(80.0);
         let is_analysis = self.mode == Mode::Analysis;
+        let is_local = self.mode == Mode::Local;
         let top = row![
             column![
                 text("FERRUM").size(20),
@@ -627,6 +734,14 @@ impl App {
                     button::primary
                 })
                 .padding([9, 18]),
+            button("Local")
+                .on_press(Message::Mode(Mode::Local))
+                .style(if is_local {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .padding([9, 14]),
             button("Analysis")
                 .on_press(Message::Mode(Mode::Analysis))
                 .style(if is_analysis {
@@ -703,6 +818,8 @@ impl App {
                 text("  •  ").color(muted()),
                 text(if is_analysis {
                     "Analysis"
+                } else if is_local {
+                    "Local player"
                 } else if self.player.side()
                     == if self.flipped {
                         Side::White
@@ -724,6 +841,8 @@ impl App {
                 text("  •  ").color(muted()),
                 text(if is_analysis {
                     "Analysis"
+                } else if is_local {
+                    "Local player"
                 } else if self.player.side()
                     == if self.flipped {
                         Side::Black
@@ -769,11 +888,15 @@ impl App {
         };
         let heading = if is_analysis {
             "Analysis board"
+        } else if is_local {
+            "Local game"
         } else {
             "Play Stockfish"
         };
         let mode_description = if is_analysis {
             "Explore a position with the engine"
+        } else if is_local {
+            "Two players at one board"
         } else {
             "A game at your own pace"
         };
@@ -847,6 +970,48 @@ impl App {
         } else {
             iced::widget::space().height(0).into()
         };
+        let result_controls: Element<'_, Message> = if let Some(confirmation) = self.confirmation {
+            let label = match confirmation {
+                Confirmation::Resign(side) => format!("Confirm {side:?} resigns?"),
+                Confirmation::AgreeDraw => "Confirm both players agree to a draw?".into(),
+            };
+            column![
+                text(label).size(13),
+                row![
+                    button("Confirm").on_press(Message::ConfirmResult),
+                    button("Cancel")
+                        .on_press(Message::CancelResult)
+                        .style(button::secondary)
+                ]
+                .spacing(6)
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            let mut controls = iced::widget::Column::new().spacing(6);
+            if self.mode != Mode::Analysis && !self.game.is_game_over() {
+                controls = controls.push(
+                    button("Resign")
+                        .on_press(Message::RequestResign)
+                        .style(button::secondary),
+                );
+            }
+            if is_local && !self.game.is_game_over() {
+                controls = controls.push(
+                    button("Agree draw")
+                        .on_press(Message::RequestDraw)
+                        .style(button::secondary),
+                );
+            }
+            if self.game.can_claim_repetition() {
+                controls = controls.push(
+                    button("Claim threefold draw")
+                        .on_press(Message::ClaimRepetition)
+                        .style(button::secondary),
+                );
+            }
+            controls.into()
+        };
         let panel: Element<'_, Message> = if self.settings_open {
             column![
                 text("Appearance").size(24),
@@ -918,6 +1083,20 @@ impl App {
                         .on_press(Message::Flip)
                         .style(button::secondary)
                         .padding([9, 12]),
+                ]
+                .spacing(6),
+                result_controls,
+                text("POSITION FEN").size(11).color(muted()),
+                text_input("Paste FEN", &self.fen_input)
+                    .on_input(Message::FenChanged)
+                    .on_submit(Message::LoadFen),
+                row![
+                    button("Load FEN")
+                        .on_press(Message::LoadFen)
+                        .style(button::secondary),
+                    button("Copy current FEN")
+                        .on_press(Message::CopyFen)
+                        .style(button::secondary),
                 ]
                 .spacing(6),
                 text("ENTER A MOVE").size(11).color(muted()),
@@ -1610,6 +1789,45 @@ mod tests {
         assert_ne!(app.generation, old_generation);
         let _ = app.update(Message::Engine(old_generation, Err("stale".into())));
         assert_eq!(app.notice, "Move undone");
+    }
+
+    #[test]
+    fn local_game_endings_and_undo_do_not_start_the_engine() {
+        let mut app = App::default();
+        app.mode = Mode::Local;
+        let _ = app.update(Message::MoveTextChanged("e2e4".into()));
+        let _ = app.update(Message::SubmitMove);
+        let _ = app.update(Message::MoveTextChanged("e7e5".into()));
+        let _ = app.update(Message::SubmitMove);
+        assert_eq!(app.game.moves(), ["e4", "e5"]);
+        assert!(!app.busy);
+        let _ = app.update(Message::RequestDraw);
+        assert_eq!(app.confirmation, Some(Confirmation::AgreeDraw));
+        let _ = app.update(Message::CancelResult);
+        assert!(!app.game.is_game_over());
+        let _ = app.update(Message::RequestResign);
+        assert_eq!(app.confirmation, Some(Confirmation::Resign(Side::White)));
+        let _ = app.update(Message::ConfirmResult);
+        assert_eq!(app.game.result(), "0-1");
+        let _ = app.update(Message::Undo);
+        assert!(!app.game.is_game_over());
+        assert_eq!(app.game.moves().len(), 2);
+        assert!(!app.busy);
+    }
+
+    #[test]
+    fn fen_input_keeps_game_on_error_and_loads_valid_position() {
+        let mut app = App::default();
+        app.mode = Mode::Local;
+        let original = app.game.fen();
+        let _ = app.update(Message::FenChanged("bad fen".into()));
+        let _ = app.update(Message::LoadFen);
+        assert_eq!(app.game.fen(), original);
+        let fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
+        let _ = app.update(Message::FenChanged(fen.into()));
+        let _ = app.update(Message::LoadFen);
+        assert_eq!(app.game.fen(), fen);
+        assert!(!app.busy);
     }
 
     #[test]

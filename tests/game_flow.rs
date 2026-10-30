@@ -159,3 +159,94 @@ fn full_game_review_with_stockfish_when_configured() {
     assert_eq!(report.moves[0].label, "1. e4");
     assert_eq!(progress.load(Ordering::Relaxed), 3);
 }
+
+#[test]
+fn repetition_requires_a_claim_at_three_and_is_automatic_at_five() {
+    let mut game = Game::default();
+    let cycle = ["g1f3", "g8f6", "f3g1", "f6g8"];
+    for mv in cycle.iter().cycle().take(8) {
+        game.play_uci(mv).unwrap();
+    }
+    assert_eq!(game.repetition_count(), 3);
+    assert!(!game.is_game_over());
+    assert!(game.can_claim_repetition());
+    let mut claimed = game.clone();
+    claimed.claim_repetition().unwrap();
+    assert_eq!(claimed.result(), "1/2-1/2");
+    assert!(claimed.play_uci("e2e4").is_err());
+    assert!(claimed.undo());
+    assert_eq!(claimed.moves().len(), 8);
+    assert!(!claimed.is_game_over());
+    for mv in cycle.iter().cycle().take(8) {
+        game.play_uci(mv).unwrap();
+    }
+    assert_eq!(game.repetition_count(), 5);
+    assert!(game.is_game_over());
+    assert_eq!(game.result(), "1/2-1/2");
+    assert!(game.play_uci("e2e4").is_err());
+    assert!(game.undo());
+    assert!(!game.is_game_over());
+}
+
+#[test]
+fn repetition_respects_castling_rights() {
+    let mut game = Game::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+    for mv in ["h1h2", "h8h7", "h2h1", "h7h8"] {
+        game.play_uci(mv).unwrap();
+    }
+    assert_eq!(game.repetition_count(), 1);
+}
+
+#[test]
+fn conservative_dead_material_does_not_declare_live_positions_drawn() {
+    for fen in [
+        "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+        "4k3/8/8/8/8/8/8/2B1K3 w - - 0 1",
+        "4k3/8/8/8/8/4b3/8/2B1K3 w - - 0 1",
+    ] {
+        let game = Game::from_fen(fen).unwrap();
+        assert!(game.is_game_over(), "{fen}");
+        assert_eq!(game.result(), "1/2-1/2");
+    }
+    for fen in [
+        "4k3/8/8/8/4b3/8/8/2B1K3 w - - 0 1",
+        "4k3/8/8/8/8/8/8/1NN1K3 w - - 0 1",
+        "4k3/8/8/8/8/8/P7/4K3 w - - 0 1",
+    ] {
+        assert!(!Game::from_fen(fen).unwrap().is_game_over(), "{fen}");
+    }
+}
+
+#[test]
+fn manual_result_roundtrips_and_undo_reopens_it() {
+    for (side, result) in [(Color::White, "0-1"), (Color::Black, "1-0")] {
+        let mut game = Game::default();
+        game.play_uci("e2e4").unwrap();
+        game.resign(side).unwrap();
+        assert_eq!(game.result(), result);
+        let mut loaded = Game::from_pgn(game.to_pgn().as_bytes()).unwrap();
+        assert!(loaded.is_game_over());
+        assert_eq!(loaded.result(), result);
+        assert!(loaded.play_uci("e7e5").is_err());
+        assert!(loaded.undo());
+        assert_eq!(loaded.moves().len(), 1);
+        loaded.play_uci("e7e5").unwrap();
+    }
+    let mut game = Game::default();
+    game.agree_draw().unwrap();
+    let loaded = Game::from_pgn(game.to_pgn().as_bytes()).unwrap();
+    assert!(loaded.is_game_over());
+    assert_eq!(loaded.result(), "1/2-1/2");
+    assert!(Game::from_pgn(b"1. f3 e5 2. g4 Qh4# 1-0").is_err());
+}
+
+#[test]
+fn fen_import_rejects_invalid_positions_and_pgn_keeps_starting_fen() {
+    assert!(Game::from_fen("not a position").is_err());
+    let fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
+    let mut game = Game::from_fen(fen).unwrap();
+    game.play_uci("e1g1").unwrap();
+    let loaded = Game::from_pgn(game.to_pgn().as_bytes()).unwrap();
+    assert_eq!(loaded.initial_fen(), fen);
+    assert_eq!(loaded.fen(), game.fen());
+}

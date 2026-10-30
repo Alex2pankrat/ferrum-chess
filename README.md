@@ -1,16 +1,20 @@
 # Ferrum Chess
 
+<img src="assets/ferrum-icon.png" alt="Ferrum Chess icon" width="96">
+
 Ferrum Chess is an experimental, offline native chess application in Rust. It uses `iced` for the interface, MIT-licensed `cozy-chess` for standard chess rules and SAN, and communicates with a separate Stockfish process over UCI. No online API or server is used by the application.
 
 ## Implemented
 
-- Play against Stockfish with selectable search depth, or choose analysis mode to play both sides and see an evaluation and best-move indicator. Engine calculations run on a worker thread.
+- Play against Stockfish with selectable search depth, play two people at one board without automatic engine moves, or choose analysis mode to play both sides and see an evaluation and best-move indicator. Engine calculations run on a worker thread.
 - Click a piece and its destination, drag from one square to another, or enter a UCI coordinate move such as `e2e4`. The board scales with the window and can be flipped independently of your side. Livius and Meridian SVG pieces, optional coordinates, legal destinations, checks, the last move and an engine hint arrow are displayed. Choose a promotion piece when a pawn reaches its last rank. A dragged piece follows the pointer.
 - Appearance settings include three board themes, two piece sets and coordinates; they are stored locally.
 - Step through and select earlier moves without changing the recorded game; return to the latest move to continue play. Analyze the entire main line locally with Stockfish, see progress, cancel, and select a reviewed move to inspect the engine's suggested alternative. Labels and centipawn losses are approximate, calculated from successive fixed-depth evaluations, not Chess.com or lichess accuracy scores. Mate scores and terminal positions are not compared as centipawns; moves without comparable evaluations are shown as unrated.
-- New game, choose a side (starts a new game), restart, and undo. Undo normally takes back both a human move and the engine response in play mode, or one ply in analysis mode.
+- New game, choose a side (starts a new game), restart, and undo. Undo normally takes back both a human move and the engine response against Stockfish, or one ply in local/analysis mode. Undo first reopens an explicitly ended game without removing a move.
+- Resign with confirmation; local players can confirm a draw by agreement. Claim a draw when the current position has occurred three times; five occurrences end the game automatically. Common dead-material cases are detected. Completed games reject further moves, and PGN results are retained on reimport.
+- Paste a standard FEN to start a fresh game from that position, or copy the displayed position FEN to the clipboard. Loading a FEN replaces the current game and its history.
 - Load/save UTF-8 PGN using a file dialog. The reader preserves `Event`, `Site`, `White`, `Black`, and `Result`, reads SAN and a standard FEN starting position, and rejects illegal moves. It skips comments, NAGs, and nested variations; it does not preserve them. Unsupported tags are discarded. One main-line game per file is supported.
-- The direct UCI adapter uses `uci`/`isready`, checks the engine's move against the board, limits each search to 15 seconds and reports timeouts, invalid output, or startup errors in the UI. Changing position or settings cancels the old search; the worker kills and reaps the child process.
+- The direct UCI adapter sends the recorded initial FEN and moves for each search, uses `uci`/`isready`, checks the engine's move against the board, limits each search to 15 seconds and reports timeouts, invalid output, or startup errors in the UI. Changing position or settings cancels the old search; the worker kills and reaps the child process.
 
 ## Build and run
 
@@ -43,11 +47,11 @@ No `Cargo.lock` is checked in yet: create and commit one on a machine with regis
 
 ## Ограничения и непроверенное
 
-- The prototype and previous installer wizard passed Windows CI, including a license audit, Clippy, tests, MSI dialog-table checks, silent install and uninstall, an installed-engine UCI test and a process-start smoke test. Its portable application was also manually played against Stockfish. The redesigned installer and desktop shortcut choice still need a manual interactive test.
+- Version 0.3.0 was manually tested on Windows by a user, including gameplay. CI also checks the installer, license audit, Clippy, tests, silent install and uninstall, and engine/process smoke tests. New functionality in 0.4.0 has not yet been manually tested.
 - CI checks that the installer contains the expected dialogs and tests a silent install; it cannot prove that the interactive wizard is visible and usable on a user's Windows desktop. Manual testing of installation, Start menu launch, gameplay and removal remains necessary for each installer release.
-- Only standard chess is supported. `cozy-chess` detects checkmate, stalemate and the 50-move threshold, but this application does not track threefold repetition or insufficient-material draws. The engine receives the current FEN, not the history needed for repetition evaluation.
-- The PGN reader deliberately implements a subset, not the full PGN specification: UTF-8, one game, ordinary one-line tag pairs and canonical SAN. Other tags, comments, annotations and variations are not round-tripped. An imported declared result is retained until a move, undo, or restart.
-- There are no clocks or online games. The v0.2.0 board and SVG pieces have been manually tested on Windows; the new game review and installer changes have not; CI checks state transitions and installation but does not verify actual visual accessibility or all interactions.
+- Only standard chess is supported. Checkmate, stalemate, current-position threefold claims, automatic fivefold repetition, and conservative dead-material cases (bare kings, one minor, or bishops all on one square color) are handled. Other dead positions are not exhaustively detected. A threefold claim based on an intended next move is not supported. Because `cozy-chess` caps its halfmove clock at 100, the 50-move threshold is currently treated as an automatic draw; the FIDE distinction between a claimable 50-move draw and an automatic 75-move draw is not implemented. FEN has no prior history, so repetitions before a FEN import cannot be detected.
+- The PGN reader deliberately implements a subset, not the full PGN specification: UTF-8, one game, ordinary one-line tag pairs and canonical SAN. Other tags, comments, annotations and variations are not round-tripped. An imported declared result ends the game; undo reopens it without removing a move, and restart clears it. Result conflicts with the terminal board are rejected.
+- There are no clocks or online games. CI checks state transitions and installation but does not verify actual visual accessibility or every interaction; the new local-play, draw and FEN controls need a manual Windows test.
 - The UCI worker has deadlines and cancellation, but arbitrary external processes and OS I/O can still fail; only a trusted Stockfish binary should be used.
 
 ## Licenses

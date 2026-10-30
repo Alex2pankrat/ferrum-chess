@@ -31,6 +31,18 @@ pub struct Game {
     initial: Board,
     history: Vec<(Board, String, Move)>,
     tags: Tags,
+    adjudication: Option<Adjudication>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Adjudication {
+    WhiteResigned,
+    BlackResigned,
+    AgreedDraw,
+    RepetitionClaim,
+    ImportedWhiteWin,
+    ImportedBlackWin,
+    ImportedDraw,
 }
 
 impl Default for Game {
@@ -41,11 +53,65 @@ impl Default for Game {
             initial,
             history: Vec::new(),
             tags: Tags::default(),
+            adjudication: None,
         }
     }
 }
 
 impl Game {
+    /// Create a fresh game from a standard FEN position.
+    pub fn from_fen(fen: &str) -> Result<Self, String> {
+        let board = Board::from_fen(fen.trim(), false).map_err(|e| format!("Invalid FEN: {e}"))?;
+        Ok(Self {
+            position: board.clone(),
+            initial: board,
+            history: Vec::new(),
+            tags: Tags::default(),
+            adjudication: None,
+        })
+    }
+    pub fn initial_fen(&self) -> String {
+        self.initial.to_string()
+    }
+    /// Number of equivalent positions in the recorded game, including the current one.
+    pub fn repetition_count(&self) -> usize {
+        1 + self
+            .history
+            .iter()
+            .filter(|(position, _, _)| position.same_position(&self.position))
+            .count()
+    }
+    pub fn can_claim_repetition(&self) -> bool {
+        !self.is_game_over() && self.repetition_count() >= 3
+    }
+    pub fn claim_repetition(&mut self) -> Result<(), String> {
+        if !self.can_claim_repetition() {
+            return Err("Threefold repetition is not available".into());
+        }
+        self.adjudication = Some(Adjudication::RepetitionClaim);
+        Ok(())
+    }
+    pub fn resign(&mut self, side: Color) -> Result<(), String> {
+        if self.is_game_over() {
+            return Err("Game is already over".into());
+        }
+        self.adjudication = Some(match side {
+            Color::White => Adjudication::WhiteResigned,
+            Color::Black => Adjudication::BlackResigned,
+        });
+        Ok(())
+    }
+    pub fn agree_draw(&mut self) -> Result<(), String> {
+        if self.is_game_over() {
+            return Err("Game is already over".into());
+        }
+        self.adjudication = Some(Adjudication::AgreedDraw);
+        Ok(())
+    }
+    pub fn has_adjudication(&self) -> bool {
+        self.adjudication.is_some()
+    }
+
     pub fn fen(&self) -> String {
         self.position.to_string()
     }
@@ -91,6 +157,9 @@ impl Game {
             .collect()
     }
     pub fn legal_targets(&self, from: Square) -> Vec<Square> {
+        if self.is_game_over() {
+            return Vec::new();
+        }
         let mut targets = Vec::new();
         self.position.generate_moves_for(from.bitboard(), |moves| {
             for mv in moves {
@@ -136,6 +205,9 @@ impl Game {
         self.apply(mv)
     }
     fn apply(&mut self, mv: Move) -> Result<(), String> {
+        if self.is_game_over() {
+            return Err("Game is already over".into());
+        }
         if !self.position.is_legal(mv) {
             return Err("Illegal move".into());
         }
@@ -148,6 +220,10 @@ impl Game {
         Ok(())
     }
     pub fn undo(&mut self) -> bool {
+        if self.adjudication.take().is_some() {
+            self.tags.result = "*".into();
+            return true;
+        }
         if let Some((position, _, _)) = self.history.pop() {
             self.position = position;
             self.tags.result = "*".into();
@@ -159,6 +235,7 @@ impl Game {
     pub fn reset(&mut self) {
         self.position = self.initial.clone();
         self.history.clear();
+        self.adjudication = None;
         self.tags.result = "*".into();
     }
     pub fn result(&self) -> &str {
@@ -166,11 +243,26 @@ impl Game {
             GameStatus::Won if self.position.side_to_move() == Color::White => "0-1",
             GameStatus::Won => "1-0",
             GameStatus::Drawn => "1/2-1/2",
-            GameStatus::Ongoing => &self.tags.result,
+            GameStatus::Ongoing => match self.adjudication {
+                Some(Adjudication::WhiteResigned | Adjudication::ImportedBlackWin) => "0-1",
+                Some(Adjudication::BlackResigned | Adjudication::ImportedWhiteWin) => "1-0",
+                Some(
+                    Adjudication::AgreedDraw
+                    | Adjudication::RepetitionClaim
+                    | Adjudication::ImportedDraw,
+                ) => "1/2-1/2",
+                None if self.repetition_count() >= 5 || insufficient_material(&self.position) => {
+                    "1/2-1/2"
+                }
+                None => &self.tags.result,
+            },
         }
     }
     pub fn is_game_over(&self) -> bool {
         self.position.status() != GameStatus::Ongoing
+            || self.adjudication.is_some()
+            || self.repetition_count() >= 5
+            || insufficient_material(&self.position)
     }
     pub fn to_pgn(&self) -> String {
         fn escape(value: &str) -> String {
@@ -284,8 +376,46 @@ impl Game {
             return Err("PGN result tag and movetext disagree".into());
         }
         game.tags.result = movetext_result.or(tag_result).unwrap_or_else(|| "*".into());
+        if game.tags.result != "*" && game.is_game_over() && game.result() != game.tags.result {
+            return Err("PGN result conflicts with the final position".into());
+        }
+        if !game.is_game_over() {
+            game.adjudication = match game.tags.result.as_str() {
+                "1-0" => Some(Adjudication::ImportedWhiteWin),
+                "0-1" => Some(Adjudication::ImportedBlackWin),
+                "1/2-1/2" => Some(Adjudication::ImportedDraw),
+                _ => None,
+            };
+        }
         Ok(game)
     }
+}
+
+// Sufficient dead-position cases: bare kings, a single minor, or only bishops
+// on squares of one color. Other theoretically dead positions are not inferred.
+fn insufficient_material(board: &Board) -> bool {
+    if !(board.pieces(Piece::Pawn) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen))
+        .is_empty()
+    {
+        return false;
+    }
+    let bishops = board.pieces(Piece::Bishop);
+    let knights = board.pieces(Piece::Knight);
+    if (bishops | knights).len() <= 1 {
+        return true;
+    }
+    if !knights.is_empty() {
+        return false;
+    }
+    let mut colors = bishops.into_iter().map(|square| {
+        let name = square.to_string();
+        let bytes = name.as_bytes();
+        (bytes[0] - b'a' + bytes[1] - b'1') & 1
+    });
+    let Some(first) = colors.next() else {
+        return true;
+    };
+    colors.all(|color| color == first)
 }
 
 fn validate_result(value: &str) -> Result<(), String> {

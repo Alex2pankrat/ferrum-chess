@@ -40,6 +40,12 @@ pub fn run() -> iced::Result {
         .window(iced::window::Settings {
             size: Size::new(1200.0, 800.0),
             min_size: Some(Size::new(520.0, 500.0)),
+            icon: iced::window::icon::from_rgba(
+                include_bytes!("../assets/ferrum-icon.rgba").to_vec(),
+                64,
+                64,
+            )
+            .ok(),
             ..iced::window::Settings::default()
         })
         .run()

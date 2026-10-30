@@ -187,6 +187,21 @@ jobs:
           $record = $view.Fetch()
           if (!$record -or $record.StringData(1) -ne 'DESKTOPSHORTCUT') { throw 'Desktop shortcut checkbox is not configured' }
           $view.Close()
+          $view = $db.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'SecureCustomProperties'")
+          $view.Execute()
+          $record = $view.Fetch()
+          if (!$record -or ($record.StringData(1) -split ';') -notcontains 'DESKTOPSHORTCUT') { throw 'Desktop choice is not propagated to elevated installation' }
+          $view.Close()
+          $sequences = @{}
+          foreach ($action in @('DesktopShortcutDlg', 'WelcomeEulaDlg')) {
+            $view = $db.OpenView("SELECT ``Sequence`` FROM ``InstallUISequence`` WHERE ``Action`` = '$action'")
+            $view.Execute()
+            $record = $view.Fetch()
+            if (!$record) { throw "Missing UI sequence action $action" }
+            $sequences[$action] = $record.IntegerData(1)
+            $view.Close()
+          }
+          if ($sequences['DesktopShortcutDlg'] -ge $sequences['WelcomeEulaDlg']) { throw 'Desktop choice is not before the welcome/license dialog' }
       - name: Smoke-test install, engine and uninstall
         shell: pwsh
         run: |

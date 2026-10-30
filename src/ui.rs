@@ -225,6 +225,11 @@ impl App {
         }
     }
     fn analyze_game(&mut self) -> Task<Message> {
+        if self.busy || self.pending_promotion.is_some() {
+            self.notice =
+                "Finish the current move or wait for the engine before reviewing the game".into();
+            return Task::none();
+        }
         let game = self.review.clone().unwrap_or_else(|| self.game.clone());
         if game.moves().is_empty() {
             self.notice = "Play or load a game before analyzing it".into();
@@ -1519,6 +1524,21 @@ mod tests {
         ));
         assert!(!state.dragging);
         assert!(state.pressed.is_none());
+    }
+
+    #[test]
+    fn game_review_does_not_interrupt_a_live_engine_move() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        app.busy = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.search_cancel = Some(Arc::clone(&cancel));
+        let generation = app.generation;
+        let _ = app.update(Message::AnalyzeGame);
+        assert!(app.busy);
+        assert_eq!(app.generation, generation);
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(app.notice.contains("wait for the engine"));
     }
 
     #[test]

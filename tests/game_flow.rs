@@ -250,3 +250,19 @@ fn fen_import_rejects_invalid_positions_and_pgn_keeps_starting_fen() {
     assert_eq!(loaded.initial_fen(), fen);
     assert_eq!(loaded.fen(), game.fen());
 }
+
+#[test]
+fn timeout_outcomes_block_moves_and_survive_pgn() {
+    let mut game = Game::default();
+    game.flag(Color::White).unwrap();
+    assert_eq!(game.result(), "0-1");
+    assert!(game.play_uci("e2e4").is_err());
+    let restored = Game::from_pgn(game.to_pgn().as_bytes()).unwrap();
+    assert!(restored.is_game_over());
+    assert_eq!(restored.result(), "0-1");
+    let mut game = Game::from_fen("4k3/8/8/8/8/8/3Q4/4K3 w - - 0 1").unwrap();
+    game.flag(Color::White).unwrap();
+    assert_eq!(game.result(), "1/2-1/2", "a bare king cannot mate");
+    assert!(game.undo());
+    assert!(!game.is_game_over());
+}

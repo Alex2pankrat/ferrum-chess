@@ -1,6 +1,6 @@
 [package]
 name = "ferrum-chess"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Offline chess desktop application"
@@ -10,6 +10,10 @@ repository = "https://github.com/Alex2pankrat/ferrum-chess"
 iced = { version = "0.14", features = ["canvas", "svg", "tokio"] }
 cozy-chess = { version = "0.3.4", features = ["std"] }
 rfd = "0.15"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
+semver = "1"
+open = { version = "5", features = ["shellexecute-on-windows"] }
 
 [build-dependencies]
 winresource = "0.1.34"

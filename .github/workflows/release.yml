@@ -61,7 +61,9 @@ jobs:
             }
             exit $code
           }
-      - name: Unit and integration tests, including Stockfish
+      - name: Unit and integration tests, including Stockfish and live update check
+        env:
+          FERRUM_TEST_LIVE_UPDATES: '1'
         shell: pwsh
         run: |
           $lines = @(cargo test --all-targets 2>&1)
@@ -205,8 +207,8 @@ jobs:
       - name: Smoke-test install, engine and uninstall
         shell: pwsh
         run: |
-          # Verify that the new installer upgrades the previously published 0.3.0 MSI.
-          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.3.0/ferrum-chess-x64.msi' -OutFile old-version.msi
+          # Verify that the new installer upgrades the previously published 0.4.0 MSI.
+          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.4.0/ferrum-chess-x64.msi' -OutFile old-version.msi
           $oldMsi = (Resolve-Path old-version.msi).Path
           $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$oldMsi`"", '/qn', '/norestart') -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Previous MSI install failed: $($p.ExitCode)" }

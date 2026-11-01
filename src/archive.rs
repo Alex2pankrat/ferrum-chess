@@ -135,7 +135,7 @@ pub fn load(dir: &Path) -> Result<(Vec<Entry>, usize), String> {
             skipped += 1;
         }
     }
-    records.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+    records.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
     Ok((records, skipped))
 }
 

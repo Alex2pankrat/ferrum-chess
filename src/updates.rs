@@ -34,6 +34,12 @@ fn parse_release(body: &str, current: &Version) -> Result<UpdateStatus, String> 
 
 fn check_url(url: &str, current: &Version) -> Result<UpdateStatus, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
         .timeout_global(Some(Duration::from_secs(12)))
         .max_redirects(0)
         .build()

@@ -43,6 +43,9 @@ enum Adjudication {
     ImportedWhiteWin,
     ImportedBlackWin,
     ImportedDraw,
+    WhiteFlagged,
+    BlackFlagged,
+    FlagDraw,
 }
 
 impl Default for Game {
@@ -98,6 +101,22 @@ impl Game {
         self.adjudication = Some(match side {
             Color::White => Adjudication::WhiteResigned,
             Color::Black => Adjudication::BlackResigned,
+        });
+        Ok(())
+    }
+    /// Record a flag fall. A lone opposing king cannot possibly give mate.
+    pub fn flag(&mut self, side: Color) -> Result<(), String> {
+        if self.is_game_over() {
+            return Err("Game is already over".into());
+        }
+        let opponent = self.position.colors(!side);
+        let opponent_non_king = opponent & !self.position.pieces(Piece::King);
+        self.adjudication = Some(if opponent_non_king.is_empty() {
+            Adjudication::FlagDraw
+        } else if side == Color::White {
+            Adjudication::WhiteFlagged
+        } else {
+            Adjudication::BlackFlagged
         });
         Ok(())
     }
@@ -244,12 +263,21 @@ impl Game {
             GameStatus::Won => "1-0",
             GameStatus::Drawn => "1/2-1/2",
             GameStatus::Ongoing => match self.adjudication {
-                Some(Adjudication::WhiteResigned | Adjudication::ImportedBlackWin) => "0-1",
-                Some(Adjudication::BlackResigned | Adjudication::ImportedWhiteWin) => "1-0",
+                Some(
+                    Adjudication::WhiteResigned
+                    | Adjudication::ImportedBlackWin
+                    | Adjudication::WhiteFlagged,
+                ) => "0-1",
+                Some(
+                    Adjudication::BlackResigned
+                    | Adjudication::ImportedWhiteWin
+                    | Adjudication::BlackFlagged,
+                ) => "1-0",
                 Some(
                     Adjudication::AgreedDraw
                     | Adjudication::RepetitionClaim
-                    | Adjudication::ImportedDraw,
+                    | Adjudication::ImportedDraw
+                    | Adjudication::FlagDraw,
                 ) => "1/2-1/2",
                 None if self.repetition_count() >= 5 || insufficient_material(&self.position) => {
                     "1/2-1/2"

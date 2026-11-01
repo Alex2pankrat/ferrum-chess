@@ -2,9 +2,11 @@
 use crate::preferences::{BoardTheme, PieceSet, Preferences};
 use cozy_chess::{Color as Side, Piece as Role, Square};
 use ferrum_chess::{
+    clock::{Clock, Preset as ClockPreset},
     engine::{self, Analysis},
     game::Game,
     report::{self, GameReport},
+    updates::{self, UpdateStatus},
 };
 use iced::{
     futures::channel::oneshot,
@@ -22,6 +24,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, OnceLock,
     },
+    time::{Duration, Instant},
 };
 
 pub fn run() -> iced::Result {
@@ -132,6 +135,9 @@ struct App {
     move_input: String,
     fen_input: String,
     confirmation: Option<Confirmation>,
+    clock: Clock,
+    update_checking: bool,
+    update_status: Option<Result<UpdateStatus, String>>,
     depth: u32,
     selected: Option<Square>,
     analysis: Option<Analysis>,
@@ -157,6 +163,9 @@ impl Default for App {
             move_input: String::new(),
             fen_input: String::new(),
             confirmation: None,
+            clock: Clock::default(),
+            update_checking: false,
+            update_status: None,
             depth: 10,
             selected: None,
             analysis: None,
@@ -192,6 +201,13 @@ enum Message {
     ConfirmResult,
     CancelResult,
     ClaimRepetition,
+    ClockPreset(ClockPreset),
+    ClockToggle,
+    ClockTick,
+    CheckUpdates,
+    UpdateChecked(Result<UpdateStatus, String>),
+    OpenRelease,
+    BrowserOpened(Result<(), String>),
     Review(usize),
     Flip,
     New,
@@ -239,10 +255,42 @@ impl App {
         self.confirmation = None;
     }
     fn subscription(&self) -> Subscription<Message> {
-        if self.report_progress.is_some() {
-            iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::ReportTick)
+        let report = if self.report_progress.is_some() {
+            iced::time::every(Duration::from_millis(300)).map(|_| Message::ReportTick)
         } else {
             Subscription::none()
+        };
+        let clock = if self.clock.running_side().is_some() {
+            iced::time::every(Duration::from_millis(200)).map(|_| Message::ClockTick)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([report, clock])
+    }
+    fn sync_clock(&mut self) {
+        if self.mode != Mode::Local || self.review.is_some() || self.game.is_game_over() {
+            self.clock.pause();
+            return;
+        }
+        if let Some(side) = self.clock.sync(Instant::now()) {
+            if self.game.flag(side).is_ok() {
+                self.game_report = None;
+                self.invalidate();
+                self.notice = format!("{side:?} ran out of time. Result: {}", self.game.result());
+            }
+        }
+    }
+    fn clock_allows_move(&self) -> bool {
+        self.mode != Mode::Local
+            || !self.clock.enabled()
+            || self.clock.running_side() == Some(self.game.position.side_to_move())
+    }
+    fn clock_after_move(&mut self, moved: Side) {
+        if self.mode == Mode::Local {
+            self.clock.completed_move(moved, Instant::now());
+            if self.game.is_game_over() {
+                self.clock.pause();
+            }
         }
     }
     fn analyze_game(&mut self) -> Task<Message> {
@@ -304,6 +352,7 @@ impl App {
     }
     fn move_piece(&mut self, from: Square, to: Square) -> Task<Message> {
         if self.busy
+            || !self.clock_allows_move()
             || self.pending_promotion.is_some()
             || self.confirmation.is_some()
             || self.game.is_game_over()
@@ -324,8 +373,15 @@ impl App {
         self.finish_move(from, to, Role::Queen)
     }
     fn finish_move(&mut self, from: Square, to: Square, promotion: Role) -> Task<Message> {
+        self.sync_clock();
+        if self.game.is_game_over() || !self.clock_allows_move() {
+            self.notice = "Start the clock before moving".into();
+            return Task::none();
+        }
+        let moved = self.game.position.side_to_move();
         match self.game.play(from, to, promotion) {
             Ok(()) => {
+                self.clock_after_move(moved);
                 self.review = None;
                 self.game_report = None;
                 self.invalidate();
@@ -344,9 +400,11 @@ impl App {
         self.settings_error = self.preferences.save().err();
     }
     fn update(&mut self, message: Message) -> Task<Message> {
+        self.sync_clock();
         match message {
             Message::Click(square) => {
                 if self.busy
+                    || !self.clock_allows_move()
                     || self.pending_promotion.is_some()
                     || self.confirmation.is_some()
                     || self.game.is_game_over()
@@ -365,12 +423,16 @@ impl App {
             }
             Message::Drag(from, to) => return self.move_piece(from, to),
             Message::Mode(mode) => {
+                if self.mode != mode {
+                    self.clock.reset();
+                }
                 self.mode = mode;
                 self.settings_open = false;
                 self.invalidate();
                 return self.maybe_search();
             }
             Message::Player(player) => {
+                self.clock.reset();
                 self.player = player;
                 self.flipped = player == Player::Black;
                 self.game = Game::default();
@@ -409,6 +471,7 @@ impl App {
             Message::MoveTextChanged(value) => self.move_input = value,
             Message::SubmitMove => {
                 if self.busy
+                    || !self.clock_allows_move()
                     || self.pending_promotion.is_some()
                     || self.confirmation.is_some()
                     || self.review.is_some()
@@ -432,8 +495,14 @@ impl App {
                         return self.move_piece(from, to);
                     }
                     if input.len() == 5 {
+                        self.sync_clock();
+                        if self.game.is_game_over() || !self.clock_allows_move() {
+                            return Task::none();
+                        }
+                        let moved = self.game.position.side_to_move();
                         match self.game.play_uci(&input) {
                             Ok(()) => {
+                                self.clock_after_move(moved);
                                 self.move_input.clear();
                                 self.game_report = None;
                                 self.review = None;
@@ -454,6 +523,7 @@ impl App {
             Message::FenChanged(value) => self.fen_input = value,
             Message::LoadFen => match Game::from_fen(&self.fen_input) {
                 Ok(game) => {
+                    self.clock.reset();
                     self.game = game;
                     self.game_report = None;
                     self.review = None;
@@ -497,6 +567,7 @@ impl App {
                 };
                 match result {
                     Ok(()) => {
+                        self.clock.pause();
                         self.game_report = None;
                         self.invalidate();
                         self.notice = format!("Game over: {}", self.game.result());
@@ -514,6 +585,7 @@ impl App {
                 } else {
                     match self.game.claim_repetition() {
                         Ok(()) => {
+                            self.clock.pause();
                             self.game_report = None;
                             self.invalidate();
                             self.notice = "Draw claimed by threefold repetition".into();
@@ -522,7 +594,57 @@ impl App {
                     }
                 }
             }
+            Message::ClockPreset(preset) => {
+                if self.mode == Mode::Local {
+                    self.clock = Clock::new(preset);
+                    self.notice = "Clock reset; press Start clock to play".into();
+                }
+            }
+            Message::ClockToggle => {
+                if self.clock.running_side().is_some() {
+                    self.clock.pause();
+                    self.notice = "Clock paused".into();
+                } else if self.mode == Mode::Local
+                    && self.review.is_none()
+                    && !self.game.is_game_over()
+                    && !self.busy
+                {
+                    if self
+                        .clock
+                        .start(self.game.position.side_to_move(), Instant::now())
+                    {
+                        self.notice = "Clock running".into();
+                    }
+                }
+            }
+            Message::ClockTick => {}
+            Message::CheckUpdates => {
+                if !self.update_checking {
+                    self.update_checking = true;
+                    self.update_status = None;
+                    return Task::perform(worker(updates::check), |result| {
+                        Message::UpdateChecked(result.and_then(std::convert::identity))
+                    });
+                }
+            }
+            Message::UpdateChecked(result) => {
+                self.update_checking = false;
+                self.update_status = Some(result);
+            }
+            Message::OpenRelease => {
+                if matches!(self.update_status, Some(Ok(UpdateStatus::Available(_)))) {
+                    return Task::perform(worker(updates::open_release), |result| {
+                        Message::BrowserOpened(result.and_then(std::convert::identity))
+                    });
+                }
+            }
+            Message::BrowserOpened(result) => {
+                if let Err(error) = result {
+                    self.update_status = Some(Err(error));
+                }
+            }
             Message::Review(ply) => {
+                self.clock.pause();
                 let full_game = self.review.clone().unwrap_or_else(|| self.game.clone());
                 if let Some(position) = full_game.at_ply(ply) {
                     self.invalidate();
@@ -543,6 +665,7 @@ impl App {
             }
             Message::Flip => self.flipped = !self.flipped,
             Message::New => {
+                self.clock.reset();
                 self.game = Game::default();
                 self.game_report = None;
                 self.review = None;
@@ -550,6 +673,7 @@ impl App {
                 return self.maybe_search();
             }
             Message::Reset => {
+                self.clock.reset();
                 self.game.reset();
                 self.game_report = None;
                 self.review = None;
@@ -560,6 +684,7 @@ impl App {
                 if self.review.is_some() {
                     return self.update(Message::Review(self.game.moves().len().saturating_sub(1)));
                 }
+                self.clock.reset();
                 self.game_report = None;
                 self.invalidate();
                 let had_adjudication = self.game.has_adjudication();
@@ -574,10 +699,14 @@ impl App {
                 return self.maybe_search();
             }
             Message::Analyze => {
+                self.clock.pause();
                 self.invalidate();
                 return self.search();
             }
-            Message::AnalyzeGame => return self.analyze_game(),
+            Message::AnalyzeGame => {
+                self.clock.pause();
+                return self.analyze_game();
+            }
             Message::CancelAnalysis => {
                 self.invalidate();
                 self.notice = "Analysis cancelled".into();
@@ -645,6 +774,7 @@ impl App {
                 }
             }
             Message::Open => {
+                self.clock.pause();
                 self.invalidate();
                 let generation = self.generation;
                 return Task::perform(
@@ -669,6 +799,7 @@ impl App {
                 }
                 match result {
                     Ok(Some(game)) => {
+                        self.clock.reset();
                         self.game = *game;
                         self.game_report = None;
                         self.review = None;
@@ -681,6 +812,7 @@ impl App {
                 }
             }
             Message::Save => {
+                self.clock.pause();
                 let pgn = self.review.as_ref().unwrap_or(&self.game).to_pgn();
                 return Task::perform(
                     worker(move || {
@@ -1012,6 +1144,86 @@ impl App {
             }
             controls.into()
         };
+        let clock_controls: Element<'_, Message> = if is_local {
+            let clock_label = if self.clock.running_side().is_some() {
+                "Pause clock"
+            } else {
+                "Start clock"
+            };
+            column![
+                text("LOCAL CLOCK").size(11).color(muted()),
+                text(format!(
+                    "White {}   ·   Black {}",
+                    self.clock.formatted(Side::White),
+                    self.clock.formatted(Side::Black)
+                ))
+                .size(18),
+                row![
+                    pick_list(
+                        [
+                            ClockPreset::Off,
+                            ClockPreset::ThreePlusTwo,
+                            ClockPreset::FivePlusThree,
+                            ClockPreset::Ten,
+                            ClockPreset::FifteenPlusTen
+                        ],
+                        Some(self.clock.preset()),
+                        Message::ClockPreset
+                    )
+                    .width(Length::Fill),
+                    button(clock_label)
+                        .on_press(Message::ClockToggle)
+                        .style(button::secondary),
+                ]
+                .spacing(6),
+                text("Changing the preset or undoing resets both clocks.")
+                    .size(11)
+                    .color(muted()),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            iced::widget::space().height(0).into()
+        };
+        let update_controls: Element<'_, Message> = {
+            let mut controls = iced::widget::Column::new()
+                .spacing(6)
+                .push(text("UPDATES").size(11).color(muted()));
+            let check = button(if self.update_checking {
+                "Checking…"
+            } else {
+                "Check for updates"
+            })
+            .style(button::secondary);
+            controls = controls.push(if self.update_checking {
+                check
+            } else {
+                check.on_press(Message::CheckUpdates)
+            });
+            controls = controls.push(
+                text("Connects to GitHub only when pressed.")
+                    .size(11)
+                    .color(muted()),
+            );
+            match &self.update_status {
+                Some(Ok(UpdateStatus::Available(version))) => {
+                    controls =
+                        controls.push(text(format!("Version {version} is available.")).size(13));
+                    controls = controls.push(
+                        button("Open release in browser")
+                            .on_press(Message::OpenRelease)
+                            .style(button::secondary),
+                    );
+                }
+                Some(Ok(UpdateStatus::Current(version))) => {
+                    controls = controls
+                        .push(text(format!("No newer release (latest: {version}).")).size(13))
+                }
+                Some(Err(error)) => controls = controls.push(text(error).size(12)),
+                None => {}
+            }
+            controls.into()
+        };
         let panel: Element<'_, Message> = if self.settings_open {
             column![
                 text("Appearance").size(24),
@@ -1086,6 +1298,7 @@ impl App {
                 ]
                 .spacing(6),
                 result_controls,
+                clock_controls,
                 text("POSITION FEN").size(11).color(muted()),
                 text_input("Paste FEN", &self.fen_input)
                     .on_input(Message::FenChanged)
@@ -1179,6 +1392,7 @@ impl App {
                 button("Restart position")
                     .on_press(Message::Reset)
                     .style(button::text),
+                update_controls,
             ]
             .spacing(10)
             .width(Length::Fill)
@@ -1828,6 +2042,53 @@ mod tests {
         let _ = app.update(Message::LoadFen);
         assert_eq!(app.game.fen(), fen);
         assert!(!app.busy);
+    }
+
+    #[test]
+    fn local_clock_blocks_paused_moves_switches_and_pauses_for_review() {
+        let mut app = App::default();
+        app.mode = Mode::Local;
+        let _ = app.update(Message::ClockPreset(ClockPreset::ThreePlusTwo));
+        let _ = app.update(Message::Drag(Square::E2, Square::E4));
+        assert!(app.game.moves().is_empty());
+        let _ = app.update(Message::ClockToggle);
+        let _ = app.update(Message::Drag(Square::E2, Square::E4));
+        assert_eq!(app.game.moves(), ["e4"]);
+        assert_eq!(app.clock.running_side(), Some(Side::Black));
+        let _ = app.update(Message::Review(0));
+        assert_eq!(app.clock.running_side(), None);
+        let _ = app.update(Message::Review(1));
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.clock.remaining(Side::White), Duration::from_secs(180));
+        assert_eq!(app.clock.running_side(), None);
+    }
+
+    #[test]
+    fn clock_flags_before_accepting_a_late_move() {
+        let mut app = App::default();
+        app.mode = Mode::Local;
+        app.clock = Clock::new(ClockPreset::ThreePlusTwo);
+        app.clock
+            .start(Side::White, Instant::now() - Duration::from_secs(181));
+        let _ = app.update(Message::Drag(Square::E2, Square::E4));
+        assert!(app.game.moves().is_empty());
+        assert_eq!(app.game.result(), "0-1");
+        assert!(app.game.is_game_over());
+    }
+
+    #[test]
+    fn update_result_is_independent_of_game_state() {
+        let mut app = App::default();
+        app.update_checking = true;
+        let _ = app.update(Message::UpdateChecked(Ok(UpdateStatus::Available(
+            "1.0.0".into(),
+        ))));
+        assert!(!app.update_checking);
+        assert!(matches!(
+            app.update_status,
+            Some(Ok(UpdateStatus::Available(_)))
+        ));
+        assert_eq!(app.game.fen(), Game::default().fen());
     }
 
     #[test]

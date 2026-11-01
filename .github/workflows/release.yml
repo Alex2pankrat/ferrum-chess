@@ -212,8 +212,8 @@ jobs:
       - name: Smoke-test install, engine and uninstall
         shell: pwsh
         run: |
-          # Verify that the new installer upgrades the previously published 0.4.0 MSI.
-          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.4.0/ferrum-chess-x64.msi' -OutFile old-version.msi
+          # Verify that the new installer upgrades the previously published 0.5.0 MSI.
+          Invoke-WebRequest 'https://github.com/Alex2pankrat/ferrum-chess/releases/download/v0.5.0/ferrum-chess-x64.msi' -OutFile old-version.msi
           $oldMsi = (Resolve-Path old-version.msi).Path
           $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$oldMsi`"", '/qn', '/norestart') -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Previous MSI install failed: $($p.ExitCode)" }

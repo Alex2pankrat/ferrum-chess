@@ -2,6 +2,7 @@
 use crate::preferences::{BoardTheme, PieceSet, Preferences};
 use cozy_chess::{Color as Side, Piece as Role, Square};
 use ferrum_chess::{
+    archive::{self, Entry as ArchiveEntry},
     clock::{Clock, Preset as ClockPreset},
     engine::{self, Analysis},
     game::Game,
@@ -122,13 +123,42 @@ enum Confirmation {
     AgreeDraw,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Game,
+    Analysis,
+    History,
+    Settings,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelTab {
+    Moves,
+    Actions,
+    Position,
+}
+struct PlaySnapshot {
+    game: Game,
+    review: Option<Game>,
+    mode: Mode,
+    clock: Clock,
+    game_report: Option<GameReport>,
+    notice: String,
+}
+
 struct App {
     game: Game,
     mode: Mode,
     player: Player,
     flipped: bool,
     preferences: Preferences,
-    settings_open: bool,
+    screen: Screen,
+    panel_tab: PanelTab,
+    play_snapshot: Option<PlaySnapshot>,
+    archive_dir: Option<std::path::PathBuf>,
+    archive_entries: Vec<ArchiveEntry>,
+    archive_error: Option<String>,
+    history_warning: Option<String>,
+    last_archived_pgn: Option<String>,
     settings_error: Option<String>,
     pending_promotion: Option<(Square, Square)>,
     review: Option<Game>,
@@ -156,7 +186,18 @@ impl Default for App {
             player: Player::White,
             flipped: false,
             preferences: Preferences::load(),
-            settings_open: false,
+            screen: Screen::Game,
+            panel_tab: PanelTab::Moves,
+            play_snapshot: None,
+            archive_dir: if cfg!(test) {
+                None
+            } else {
+                archive::default_directory()
+            },
+            archive_entries: Vec::new(),
+            archive_error: None,
+            history_warning: None,
+            last_archived_pgn: None,
             settings_error: None,
             pending_promotion: None,
             review: None,
@@ -187,7 +228,9 @@ enum Message {
     Depth(u32),
     Promote(Promotion),
     CancelPromotion,
-    Appearance(bool),
+    Navigate(Screen),
+    Panel(PanelTab),
+    OpenArchived(usize),
     BoardTheme(BoardTheme),
     PieceSet(PieceSet),
     Coordinates(bool),
@@ -366,7 +409,6 @@ impl App {
             && self.game.legal_targets(from).contains(&to);
         if promotes {
             self.pending_promotion = Some((from, to));
-            self.settings_open = false;
             self.notice = "Choose a piece for your pawn".into();
             return Task::none();
         }
@@ -396,11 +438,103 @@ impl App {
             }
         }
     }
+    fn archive_finished(&mut self) {
+        if self.screen != Screen::Game || self.mode == Mode::Analysis || self.review.is_some() {
+            return;
+        }
+        if !self.game.is_game_over() {
+            self.last_archived_pgn = None;
+            return;
+        }
+        let pgn = self.game.to_pgn();
+        if self.last_archived_pgn.as_ref() == Some(&pgn) {
+            return;
+        }
+        let Some(dir) = &self.archive_dir else {
+            if !cfg!(test) {
+                self.archive_error = Some("Game history directory is unavailable".into());
+            }
+            return;
+        };
+        let mode = if self.mode == Mode::Local {
+            "Local"
+        } else {
+            "Stockfish"
+        };
+        match archive::save(dir, &self.game, mode) {
+            Ok(()) => {
+                self.last_archived_pgn = Some(pgn);
+                self.archive_error = None;
+            }
+            Err(error) => self.archive_error = Some(error),
+        }
+    }
+    fn reload_archive(&mut self) {
+        match self
+            .archive_dir
+            .as_ref()
+            .ok_or_else(|| "Game history directory is unavailable".to_owned())
+            .and_then(|dir| archive::load(dir))
+        {
+            Ok((entries, skipped)) => {
+                self.archive_entries = entries;
+                self.history_warning =
+                    (skipped > 0).then(|| format!("{skipped} history record(s) could not be read"));
+            }
+            Err(error) => self.history_warning = Some(error),
+        }
+    }
+    fn navigate(&mut self, screen: Screen) -> Task<Message> {
+        if screen == self.screen {
+            return Task::none();
+        }
+        self.clock.pause();
+        self.invalidate();
+        if screen == Screen::Analysis && self.mode != Mode::Analysis {
+            self.play_snapshot = Some(PlaySnapshot {
+                game: self.game.clone(),
+                review: self.review.clone(),
+                mode: self.mode,
+                clock: self.clock.clone(),
+                game_report: self.game_report.clone(),
+                notice: self.notice.clone(),
+            });
+            self.game = self.review.clone().unwrap_or_else(|| self.game.clone());
+            self.review = None;
+            self.game_report = None;
+            self.mode = Mode::Analysis;
+            self.notice = "Analysis copy — your game is preserved".into();
+        } else if screen == Screen::Game && self.mode == Mode::Analysis {
+            if let Some(snapshot) = self.play_snapshot.take() {
+                self.game = snapshot.game;
+                self.review = snapshot.review;
+                self.mode = snapshot.mode;
+                self.clock = snapshot.clock;
+                self.game_report = snapshot.game_report;
+                self.notice = snapshot.notice;
+            }
+        }
+        self.screen = screen;
+        self.panel_tab = PanelTab::Moves;
+        if screen == Screen::History {
+            self.reload_archive();
+        }
+        if screen == Screen::Game && self.review.is_none() {
+            return self.maybe_search();
+        }
+        Task::none()
+    }
     fn save_preferences(&mut self) {
         self.settings_error = self.preferences.save().err();
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         self.sync_clock();
+        self.archive_finished();
+        let task = self.handle_message(message);
+        self.archive_finished();
+        task
+    }
+    fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Click(square) => {
                 if self.busy
@@ -427,7 +561,6 @@ impl App {
                     self.clock.reset();
                 }
                 self.mode = mode;
-                self.settings_open = false;
                 self.invalidate();
                 return self.maybe_search();
             }
@@ -455,7 +588,26 @@ impl App {
                 self.pending_promotion = None;
                 self.notice = "Promotion cancelled".into();
             }
-            Message::Appearance(open) => self.settings_open = open,
+            Message::Navigate(screen) => return self.navigate(screen),
+            Message::Panel(tab) => self.panel_tab = tab,
+            Message::OpenArchived(index) => {
+                if let Some(entry) = self.archive_entries.get(index).cloned() {
+                    match Game::from_pgn(entry.pgn.as_bytes()) {
+                        Ok(game) => {
+                            let _ = self.navigate(Screen::Analysis);
+                            self.invalidate();
+                            self.game = game;
+                            self.review = None;
+                            self.game_report = None;
+                            self.panel_tab = PanelTab::Moves;
+                            self.notice = "Archived game loaded for analysis".into();
+                        }
+                        Err(error) => {
+                            self.history_warning = Some(format!("Cannot open saved game: {error}"))
+                        }
+                    }
+                }
+            }
             Message::BoardTheme(theme) => {
                 self.preferences.board = theme;
                 self.save_preferences();
@@ -840,58 +992,198 @@ impl App {
     }
 
     fn layout(&self, size: Size) -> Element<'_, Message> {
-        let compact = size.width < 900.0;
+        let compact = size.width < 900.0 || size.height < 700.0;
         let board_size = if compact {
-            (size.width - 48.0).min(720.0)
+            (size.width - 48.0).min((size.height - 150.0).max(220.0))
         } else {
-            (size.width - 406.0).min(size.height - 206.0).min(760.0)
+            (size.width - 430.0).min(size.height - 180.0)
         }
         .max(80.0);
-        let is_analysis = self.mode == Mode::Analysis;
+        let is_analysis = self.screen == Screen::Analysis;
         let is_local = self.mode == Mode::Local;
-        let top = row![
+        let nav_button = |label: &'static str, screen| {
+            button(text(label).size(14))
+                .on_press(Message::Navigate(screen))
+                .style(if self.screen == screen {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .padding([8, 11])
+        };
+        let brand: Element<'_, Message> = if compact {
+            iced::widget::space().width(Length::Fill).into()
+        } else {
             column![
-                text("FERRUM").size(20),
-                text("CHESS STUDIO").size(10).color(muted()),
+                text("FERRUM").size(19),
+                text("CHESS STUDIO").size(10).color(muted())
             ]
-            .spacing(0)
-            .width(Length::Fill),
-            button("Play")
-                .on_press(Message::Mode(Mode::Play))
-                .style(if is_analysis {
-                    button::secondary
-                } else {
-                    button::primary
-                })
-                .padding([9, 18]),
-            button("Local")
-                .on_press(Message::Mode(Mode::Local))
-                .style(if is_local {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .padding([9, 14]),
-            button("Analysis")
-                .on_press(Message::Mode(Mode::Analysis))
-                .style(if is_analysis {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .padding([9, 18]),
-            button("Appearance")
-                .on_press(Message::Appearance(!self.settings_open))
-                .style(if self.settings_open {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .padding([9, 14]),
+            .width(Length::Fill)
+            .into()
+        };
+        let header = row![
+            brand,
+            nav_button("Play", Screen::Game),
+            nav_button("Analysis", Screen::Analysis),
+            nav_button("History", Screen::History),
+            nav_button("Settings", Screen::Settings)
         ]
-        .spacing(8)
+        .spacing(5)
         .align_y(iced::Alignment::Center);
 
+        if self.screen == Screen::Settings {
+            let check = button(if self.update_checking {
+                "Checking…"
+            } else {
+                "Check for updates"
+            })
+            .style(button::secondary);
+            let check = if self.update_checking {
+                check
+            } else {
+                check.on_press(Message::CheckUpdates)
+            };
+            let mut updates = iced::widget::Column::new()
+                .spacing(10)
+                .push(text("Updates").size(20))
+                .push(
+                    text("A request to GitHub is made only when you press the button.")
+                        .size(13)
+                        .color(muted()),
+                )
+                .push(check);
+            match &self.update_status {
+                Some(Ok(UpdateStatus::Available(version))) => {
+                    updates = updates
+                        .push(text(format!("Version {version} is available.")))
+                        .push(
+                            button("Open release in browser")
+                                .on_press(Message::OpenRelease)
+                                .style(button::secondary),
+                        );
+                }
+                Some(Ok(UpdateStatus::Current(version))) => {
+                    updates = updates.push(text(format!("No newer release (latest: {version}).")))
+                }
+                Some(Err(error)) => updates = updates.push(text(error).size(13)),
+                None => {}
+            }
+            let appearance = column![
+                text("Appearance").size(20),
+                text("BOARD THEME").size(11).color(muted()),
+                pick_list(
+                    [BoardTheme::Forest, BoardTheme::Walnut, BoardTheme::Slate],
+                    Some(self.preferences.board),
+                    Message::BoardTheme
+                )
+                .width(Length::Fill),
+                text("PIECE SET").size(11).color(muted()),
+                pick_list(
+                    [PieceSet::Livius, PieceSet::Meridian],
+                    Some(self.preferences.pieces),
+                    Message::PieceSet
+                )
+                .width(Length::Fill),
+                checkbox(self.preferences.coordinates)
+                    .label("Show board coordinates")
+                    .on_toggle(Message::Coordinates),
+                text(
+                    self.settings_error
+                        .as_deref()
+                        .unwrap_or("Settings are stored on this device.")
+                )
+                .size(12)
+                .color(muted()),
+            ]
+            .spacing(12);
+            let appearance = container(appearance)
+                .padding(20)
+                .width(Length::Fill)
+                .style(card_style);
+            let updates = container(updates)
+                .padding(20)
+                .width(Length::Fill)
+                .style(card_style);
+            let cards: Element<'_, Message> = if compact {
+                column![appearance, updates].spacing(16).into()
+            } else {
+                row![appearance, updates].spacing(16).into()
+            };
+            return container(
+                column![
+                    header,
+                    text("Settings").size(28),
+                    scrollable(cards).height(Length::Fill)
+                ]
+                .spacing(20)
+                .padding(20),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
+        if self.screen == Screen::History {
+            let items: Element<'_, Message> = if self.archive_entries.is_empty() {
+                text("No completed games saved yet. Completed games are saved on this device.")
+                    .size(15)
+                    .color(muted())
+                    .into()
+            } else {
+                column(self.archive_entries.iter().enumerate().map(|(i, entry)| {
+                    button(
+                        row![
+                            column![
+                                text(format!("Game {}  ·  {}", i + 1, entry.result)).size(17),
+                                text(format!(
+                                    "{}  ·  {} plies  ·  {}",
+                                    entry.mode,
+                                    entry.plies,
+                                    archive::display_date(entry.timestamp_ms)
+                                ))
+                                .size(12)
+                                .color(muted())
+                            ]
+                            .spacing(4)
+                            .width(Length::Fill),
+                            text("Open in analysis  →").size(13)
+                        ]
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .on_press(Message::OpenArchived(i))
+                    .style(button::secondary)
+                    .padding(14)
+                    .width(Length::Fill)
+                    .into()
+                }))
+                .spacing(8)
+                .into()
+            };
+            return container(
+                column![
+                    header,
+                    text("Game history").size(28),
+                    text(
+                        "Completed games are stored locally. Select one to review and analyze it."
+                    )
+                    .size(14)
+                    .color(muted()),
+                    text(
+                        self.archive_error
+                            .as_deref()
+                            .or(self.history_warning.as_deref())
+                            .unwrap_or("")
+                    )
+                    .size(13)
+                    .color(Color::from_rgb8(235, 145, 140)),
+                    scrollable(items).height(Length::Fill)
+                ]
+                .spacing(16)
+                .padding(20),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
         let board = Canvas::new(Board { app: self })
             .width(board_size)
             .height(board_size);
@@ -962,8 +1254,20 @@ impl App {
                     "Stockfish"
                 })
                 .size(13)
-                .color(muted())
+                .color(muted()),
+                iced::widget::space().width(Length::Fill),
+                text(if is_local && self.clock.enabled() {
+                    self.clock.formatted(if self.flipped {
+                        Side::White
+                    } else {
+                        Side::Black
+                    })
+                } else {
+                    String::new()
+                })
+                .size(18),
             ]
+            .width(Length::Fill)
             .align_y(iced::Alignment::Center),
             board,
             row![
@@ -985,51 +1289,29 @@ impl App {
                     "Stockfish"
                 })
                 .size(13)
-                .color(muted())
+                .color(muted()),
+                iced::widget::space().width(Length::Fill),
+                text(if is_local && self.clock.enabled() {
+                    self.clock.formatted(if self.flipped {
+                        Side::Black
+                    } else {
+                        Side::White
+                    })
+                } else {
+                    String::new()
+                })
+                .size(18),
             ]
+            .width(Length::Fill)
             .align_y(iced::Alignment::Center),
         ]
-        .spacing(8);
+        .spacing(8)
+        .width(board_size);
 
         let current_ply = self.game.moves().len();
         let full_game = self.review.as_ref().unwrap_or(&self.game);
         let moves = full_game.numbered_moves();
         let total_moves = moves.len();
-        let move_list: Element<'_, Message> = if moves.is_empty() {
-            text("Your moves will appear here.")
-                .size(14)
-                .color(muted())
-                .into()
-        } else {
-            column(moves.into_iter().enumerate().map(|(index, label)| {
-                button(text(label).size(14).width(Length::Fill))
-                    .style(if current_ply == index + 1 {
-                        button::secondary
-                    } else {
-                        button::text
-                    })
-                    .padding([5, 8])
-                    .width(Length::Fill)
-                    .on_press(Message::Review(index + 1))
-                    .into()
-            }))
-            .spacing(2)
-            .into()
-        };
-        let heading = if is_analysis {
-            "Analysis board"
-        } else if is_local {
-            "Local game"
-        } else {
-            "Play Stockfish"
-        };
-        let mode_description = if is_analysis {
-            "Explore a position with the engine"
-        } else if is_local {
-            "Two players at one board"
-        } else {
-            "A game at your own pace"
-        };
         let status = if self.busy {
             "ENGINE THINKING"
         } else if self.review.is_some() {
@@ -1039,277 +1321,295 @@ impl App {
         } else {
             "READY"
         };
-        let review_control: Element<'_, Message> = if let Some(progress) = &self.report_progress {
-            column![
-                text(format!(
-                    "Reviewing positions: {} / {}",
-                    progress.load(Ordering::Relaxed),
-                    total_moves + 1
-                ))
-                .size(12)
-                .color(muted()),
-                button("Cancel game review")
-                    .on_press(Message::CancelAnalysis)
-                    .style(button::secondary),
-            ]
-            .spacing(6)
-            .into()
+        let heading = if is_analysis {
+            "Analysis board"
+        } else if is_local {
+            "Local game"
         } else {
-            button("Analyze entire game")
-                .on_press(Message::AnalyzeGame)
-                .style(button::secondary)
-                .into()
+            "Play Stockfish"
         };
-        let review_details: Element<'_, Message> = if let Some(report) = &self.game_report {
-            let entries: Vec<Element<'_, Message>> = report
-                .moves
-                .iter()
-                .enumerate()
-                .map(|(index, review)| {
-                    let loss = review
-                        .centipawn_loss
-                        .map(|v| format!(" · {v} cp"))
-                        .unwrap_or_default();
-                    button(
-                        text(format!(
-                            "{}  ·  {}{}",
-                            review.label, review.classification, loss
-                        ))
-                        .size(13)
-                        .width(Length::Fill),
-                    )
-                    .on_press(Message::ReportMove(index))
-                    .style(button::text)
-                    .width(Length::Fill)
-                    .padding([5, 6])
-                    .into()
-                })
-                .collect();
-            column![
-                text("GAME REVIEW").size(11).color(muted()),
-                text("Approximate engine evaluation • select a move to inspect")
-                    .size(11)
-                    .color(muted()),
-                container(scrollable(column(entries)).height(160))
-                    .padding(8)
-                    .width(Length::Fill)
-                    .style(card_style),
-            ]
-            .spacing(6)
-            .into()
-        } else {
-            iced::widget::space().height(0).into()
-        };
-        let result_controls: Element<'_, Message> = if let Some(confirmation) = self.confirmation {
-            let label = match confirmation {
-                Confirmation::Resign(side) => format!("Confirm {side:?} resigns?"),
-                Confirmation::AgreeDraw => "Confirm both players agree to a draw?".into(),
-            };
-            column![
-                text(label).size(13),
-                row![
-                    button("Confirm").on_press(Message::ConfirmResult),
-                    button("Cancel")
-                        .on_press(Message::CancelResult)
-                        .style(button::secondary)
-                ]
-                .spacing(6)
-            ]
-            .spacing(6)
-            .into()
-        } else {
-            let mut controls = iced::widget::Column::new().spacing(6);
-            if self.mode != Mode::Analysis && !self.game.is_game_over() {
-                controls = controls.push(
-                    button("Resign")
-                        .on_press(Message::RequestResign)
-                        .style(button::secondary),
-                );
-            }
-            if is_local && !self.game.is_game_over() {
-                controls = controls.push(
-                    button("Agree draw")
-                        .on_press(Message::RequestDraw)
-                        .style(button::secondary),
-                );
-            }
-            if self.game.can_claim_repetition() {
-                controls = controls.push(
-                    button("Claim threefold draw")
-                        .on_press(Message::ClaimRepetition)
-                        .style(button::secondary),
-                );
-            }
-            controls.into()
-        };
-        let clock_controls: Element<'_, Message> = if is_local {
-            let clock_label = if self.clock.running_side().is_some() {
-                "Pause clock"
-            } else {
-                "Start clock"
-            };
-            column![
-                text("LOCAL CLOCK").size(11).color(muted()),
-                text(format!(
-                    "White {}   ·   Black {}",
-                    self.clock.formatted(Side::White),
-                    self.clock.formatted(Side::Black)
-                ))
-                .size(18),
-                row![
-                    pick_list(
-                        [
-                            ClockPreset::Off,
-                            ClockPreset::ThreePlusTwo,
-                            ClockPreset::FivePlusThree,
-                            ClockPreset::Ten,
-                            ClockPreset::FifteenPlusTen
-                        ],
-                        Some(self.clock.preset()),
-                        Message::ClockPreset
-                    )
-                    .width(Length::Fill),
-                    button(clock_label)
-                        .on_press(Message::ClockToggle)
-                        .style(button::secondary),
-                ]
-                .spacing(6),
-                text("Changing the preset or undoing resets both clocks.")
-                    .size(11)
-                    .color(muted()),
-            ]
-            .spacing(6)
-            .into()
-        } else {
-            iced::widget::space().height(0).into()
-        };
-        let update_controls: Element<'_, Message> = {
-            let mut controls = iced::widget::Column::new()
-                .spacing(6)
-                .push(text("UPDATES").size(11).color(muted()));
-            let check = button(if self.update_checking {
-                "Checking…"
-            } else {
-                "Check for updates"
-            })
-            .style(button::secondary);
-            controls = controls.push(if self.update_checking {
-                check
-            } else {
-                check.on_press(Message::CheckUpdates)
-            });
-            controls = controls.push(
-                text("Connects to GitHub only when pressed.")
-                    .size(11)
-                    .color(muted()),
-            );
-            match &self.update_status {
-                Some(Ok(UpdateStatus::Available(version))) => {
-                    controls =
-                        controls.push(text(format!("Version {version} is available.")).size(13));
-                    controls = controls.push(
-                        button("Open release in browser")
-                            .on_press(Message::OpenRelease)
-                            .style(button::secondary),
-                    );
-                }
-                Some(Ok(UpdateStatus::Current(version))) => {
-                    controls = controls
-                        .push(text(format!("No newer release (latest: {version}).")).size(13))
-                }
-                Some(Err(error)) => controls = controls.push(text(error).size(12)),
-                None => {}
-            }
-            controls.into()
-        };
-        let panel: Element<'_, Message> = if self.settings_open {
-            column![
-                text("Appearance").size(24),
-                text("Make the board your own").size(13).color(muted()),
-                container(
-                    column![
-                        text("BOARD THEME").size(11).color(muted()),
-                        pick_list(
-                            [BoardTheme::Forest, BoardTheme::Walnut, BoardTheme::Slate],
-                            Some(self.preferences.board),
-                            Message::BoardTheme
-                        )
-                        .width(Length::Fill),
-                        text("PIECE SET").size(11).color(muted()),
-                        pick_list(
-                            [PieceSet::Livius, PieceSet::Meridian],
-                            Some(self.preferences.pieces),
-                            Message::PieceSet
-                        )
-                        .width(Length::Fill),
-                        checkbox(self.preferences.coordinates)
-                            .label("Show board coordinates")
-                            .on_toggle(Message::Coordinates),
-                    ]
-                    .spacing(12)
-                )
-                .padding(18)
-                .width(Length::Fill)
-                .style(card_style),
-                text(
-                    self.settings_error
-                        .as_deref()
-                        .unwrap_or("Settings are stored on this device.")
-                )
-                .size(12)
-                .color(if self.settings_error.is_some() {
-                    Color::from_rgb8(235, 145, 140)
+        let tab = |label: &'static str, value| {
+            button(text(label).size(13))
+                .on_press(Message::Panel(value))
+                .style(if self.panel_tab == value {
+                    button::primary
                 } else {
-                    muted()
-                }),
-                button("Back to game")
-                    .on_press(Message::Appearance(false))
-                    .padding([9, 12]),
-            ]
-            .spacing(14)
-            .width(Length::Fill)
-            .into()
-        } else {
+                    button::secondary
+                })
+                .padding([7, 9])
+        };
+        let tabs = row![
+            tab("Moves", PanelTab::Moves),
+            tab(
+                if is_analysis { "Review" } else { "Game" },
+                PanelTab::Actions
+            ),
+            tab("Position", PanelTab::Position)
+        ]
+        .spacing(5);
+        let status_card = container(
             column![
-                text(heading).size(24),
-                text(mode_description).size(13).color(muted()),
-                container(
-                    column![
-                        text(status).size(11).color(accent()),
-                        text(&self.notice).size(14)
+                text(status).size(11).color(accent()),
+                text(&self.notice).size(13)
+            ]
+            .spacing(5),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(card_style);
+        let body: Element<'_, Message> = match self.panel_tab {
+            PanelTab::Moves => {
+                let move_list: Element<'_, Message> = if moves.is_empty() {
+                    text("Moves will appear here.")
+                        .size(13)
+                        .color(muted())
+                        .into()
+                } else {
+                    column(moves.into_iter().enumerate().map(|(i, label)| {
+                        button(text(label).size(14).width(Length::Fill))
+                            .style(if current_ply == i + 1 {
+                                button::secondary
+                            } else {
+                                button::text
+                            })
+                            .padding([4, 8])
+                            .width(Length::Fill)
+                            .on_press(Message::Review(i + 1))
+                            .into()
+                    }))
+                    .spacing(2)
+                    .into()
+                };
+                let move_height = if compact {
+                    Length::Fixed(150.0)
+                } else {
+                    Length::Fill
+                };
+                let analyze = if is_analysis {
+                    button("Analyze position").on_press(Message::Analyze)
+                } else {
+                    button("Open analysis").on_press(Message::Navigate(Screen::Analysis))
+                };
+                column![
+                    row![
+                        button("New").on_press(Message::New),
+                        button("Undo")
+                            .on_press(Message::Undo)
+                            .style(button::secondary),
+                        button("Flip")
+                            .on_press(Message::Flip)
+                            .style(button::secondary)
+                    ]
+                    .spacing(6),
+                    row![
+                        button("|<")
+                            .on_press(Message::Review(0))
+                            .style(button::secondary),
+                        button("<")
+                            .on_press(Message::Review(current_ply.saturating_sub(1)))
+                            .style(button::secondary),
+                        button(">")
+                            .on_press(Message::Review((current_ply + 1).min(total_moves)))
+                            .style(button::secondary),
+                        button(">|")
+                            .on_press(Message::Review(total_moves))
+                            .style(button::secondary),
+                        text(format!("{current_ply} / {total_moves}"))
+                            .size(12)
+                            .color(muted())
                     ]
                     .spacing(6)
-                )
-                .padding(14)
-                .width(Length::Fill)
-                .style(card_style),
-                row![
-                    button("New game").on_press(Message::New).padding([9, 12]),
-                    button("Undo")
-                        .on_press(Message::Undo)
-                        .style(button::secondary)
-                        .padding([9, 12]),
-                    button("Flip board")
-                        .on_press(Message::Flip)
-                        .style(button::secondary)
-                        .padding([9, 12]),
+                    .align_y(iced::Alignment::Center),
+                    container(scrollable(move_list).height(move_height))
+                        .padding(8)
+                        .width(Length::Fill)
+                        .height(move_height)
+                        .style(card_style),
+                    analyze.style(button::secondary),
                 ]
-                .spacing(6),
-                result_controls,
-                clock_controls,
-                text("POSITION FEN").size(11).color(muted()),
-                text_input("Paste FEN", &self.fen_input)
-                    .on_input(Message::FenChanged)
-                    .on_submit(Message::LoadFen),
-                row![
-                    button("Load FEN")
-                        .on_press(Message::LoadFen)
-                        .style(button::secondary),
-                    button("Copy current FEN")
-                        .on_press(Message::CopyFen)
-                        .style(button::secondary),
+                .spacing(10)
+                .height(if compact {
+                    Length::Shrink
+                } else {
+                    Length::Fill
+                })
+                .into()
+            }
+            PanelTab::Actions if is_analysis => {
+                let review_control: Element<'_, Message> =
+                    if let Some(progress) = &self.report_progress {
+                        column![
+                            text(format!(
+                                "Reviewing positions: {} / {}",
+                                progress.load(Ordering::Relaxed),
+                                total_moves + 1
+                            ))
+                            .size(12),
+                            button("Cancel game review")
+                                .on_press(Message::CancelAnalysis)
+                                .style(button::secondary)
+                        ]
+                        .spacing(6)
+                        .into()
+                    } else {
+                        button("Analyze entire game")
+                            .on_press(Message::AnalyzeGame)
+                            .style(button::secondary)
+                            .into()
+                    };
+                let details: Element<'_, Message> = if let Some(report) = &self.game_report {
+                    let entries = report.moves.iter().enumerate().map(|(index, review)| {
+                        let loss = review
+                            .centipawn_loss
+                            .map(|v| format!(" · {v} cp"))
+                            .unwrap_or_default();
+                        button(
+                            text(format!(
+                                "{}  ·  {}{}",
+                                review.label, review.classification, loss
+                            ))
+                            .size(13)
+                            .width(Length::Fill),
+                        )
+                        .on_press(Message::ReportMove(index))
+                        .style(button::text)
+                        .width(Length::Fill)
+                        .into()
+                    });
+                    scrollable(column(entries).spacing(2))
+                        .height(if compact {
+                            Length::Fixed(160.0)
+                        } else {
+                            Length::Fill
+                        })
+                        .into()
+                } else {
+                    text("Select Analyze entire game to review the main line.")
+                        .size(13)
+                        .color(muted())
+                        .into()
+                };
+                column![
+                    text("ENGINE DEPTH").size(11).color(muted()),
+                    pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth)
+                        .width(Length::Fill),
+                    review_control,
+                    text("Approximate evaluation; select a move to inspect.")
+                        .size(12)
+                        .color(muted()),
+                    details
                 ]
-                .spacing(6),
+                .spacing(10)
+                .height(if compact {
+                    Length::Shrink
+                } else {
+                    Length::Fill
+                })
+                .into()
+            }
+            PanelTab::Actions => {
+                let result_controls: Element<'_, Message> = if let Some(confirmation) =
+                    self.confirmation
+                {
+                    let label = match confirmation {
+                        Confirmation::Resign(side) => format!("Confirm {side:?} resigns?"),
+                        Confirmation::AgreeDraw => "Confirm both players agree to a draw?".into(),
+                    };
+                    column![
+                        text(label).size(13),
+                        row![
+                            button("Confirm").on_press(Message::ConfirmResult),
+                            button("Cancel")
+                                .on_press(Message::CancelResult)
+                                .style(button::secondary)
+                        ]
+                        .spacing(6)
+                    ]
+                    .spacing(6)
+                    .into()
+                } else {
+                    let mut controls = iced::widget::Column::new().spacing(6);
+                    if !self.game.is_game_over() {
+                        controls = controls.push(
+                            button("Resign")
+                                .on_press(Message::RequestResign)
+                                .style(button::secondary),
+                        );
+                    }
+                    if is_local && !self.game.is_game_over() {
+                        controls = controls.push(
+                            button("Agree draw")
+                                .on_press(Message::RequestDraw)
+                                .style(button::secondary),
+                        );
+                    }
+                    if self.game.can_claim_repetition() {
+                        controls = controls.push(
+                            button("Claim threefold draw")
+                                .on_press(Message::ClaimRepetition)
+                                .style(button::secondary),
+                        );
+                    }
+                    controls.into()
+                };
+                let clock: Element<'_, Message> = if is_local {
+                    column![
+                        text("LOCAL CLOCK").size(11).color(muted()),
+                        row![
+                            pick_list(
+                                [
+                                    ClockPreset::Off,
+                                    ClockPreset::ThreePlusTwo,
+                                    ClockPreset::FivePlusThree,
+                                    ClockPreset::Ten,
+                                    ClockPreset::FifteenPlusTen
+                                ],
+                                Some(self.clock.preset()),
+                                Message::ClockPreset
+                            )
+                            .width(Length::Fill),
+                            button(if self.clock.running_side().is_some() {
+                                "Pause"
+                            } else {
+                                "Start"
+                            })
+                            .on_press(Message::ClockToggle)
+                            .style(button::secondary)
+                        ]
+                        .spacing(6),
+                        text("Changing the preset or undoing resets both clocks.")
+                            .size(11)
+                            .color(muted())
+                    ]
+                    .spacing(6)
+                    .into()
+                } else {
+                    column![
+                        text("PLAY AS").size(11).color(muted()),
+                        pick_list(
+                            [Player::White, Player::Black],
+                            Some(self.player),
+                            Message::Player
+                        )
+                        .width(Length::Fill),
+                        text("ENGINE DEPTH").size(11).color(muted()),
+                        pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth)
+                            .width(Length::Fill)
+                    ]
+                    .spacing(6)
+                    .into()
+                };
+                column![
+                    text("GAME TYPE").size(11).color(muted()),
+                    pick_list([Mode::Play, Mode::Local], Some(self.mode), Message::Mode)
+                        .width(Length::Fill),
+                    clock,
+                    result_controls
+                ]
+                .spacing(10)
+                .into()
+            }
+            PanelTab::Position => column![
                 text("ENTER A MOVE").size(11).color(muted()),
                 row![
                     text_input("e2e4", &self.move_input)
@@ -1319,96 +1619,71 @@ impl App {
                     button("Move")
                         .on_press(Message::SubmitMove)
                         .style(button::secondary)
-                        .padding([9, 12])
-                ]
-                .spacing(8),
-                text("GAME SETTINGS").size(11).color(muted()),
-                row![
-                    column![
-                        text("Play as").size(12).color(muted()),
-                        pick_list(
-                            [Player::White, Player::Black],
-                            Some(self.player),
-                            Message::Player
-                        )
-                        .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill),
-                    column![
-                        text("Engine depth").size(12).color(muted()),
-                        pick_list([4, 6, 8, 10, 12, 14, 16], Some(self.depth), Message::Depth)
-                            .width(Length::Fill)
-                    ]
-                    .spacing(5)
-                    .width(Length::Fill),
-                ]
-                .spacing(10),
-                row![
-                    text("MOVES").size(11).color(muted()).width(Length::Fill),
-                    text(format!("{current_ply} / {total_moves} plies"))
-                        .size(11)
-                        .color(muted())
-                ]
-                .align_y(iced::Alignment::Center),
-                row![
-                    button("|<")
-                        .on_press(Message::Review(0))
-                        .style(button::secondary),
-                    button("<")
-                        .on_press(Message::Review(current_ply.saturating_sub(1)))
-                        .style(button::secondary),
-                    button(">")
-                        .on_press(Message::Review((current_ply + 1).min(total_moves)))
-                        .style(button::secondary),
-                    button(">|")
-                        .on_press(Message::Review(total_moves))
-                        .style(button::secondary),
                 ]
                 .spacing(6),
-                container(scrollable(move_list).height(110))
-                    .padding(12)
-                    .width(Length::Fill)
-                    .style(card_style),
-                review_control,
-                review_details,
+                text("POSITION FEN").size(11).color(muted()),
+                text_input("Paste FEN", &self.fen_input)
+                    .on_input(Message::FenChanged)
+                    .on_submit(Message::LoadFen),
+                row![
+                    button("Load FEN")
+                        .on_press(Message::LoadFen)
+                        .style(button::secondary),
+                    button("Copy FEN")
+                        .on_press(Message::CopyFen)
+                        .style(button::secondary)
+                ]
+                .spacing(6),
                 row![
                     button("Open PGN")
                         .on_press(Message::Open)
-                        .style(button::secondary)
-                        .padding([9, 12]),
+                        .style(button::secondary),
                     button("Save PGN")
                         .on_press(Message::Save)
                         .style(button::secondary)
-                        .padding([9, 12]),
-                    button("Analyze")
-                        .on_press(Message::Analyze)
-                        .style(button::secondary)
-                        .padding([9, 12]),
                 ]
                 .spacing(6),
                 button("Restart position")
                     .on_press(Message::Reset)
                     .style(button::text),
-                update_controls,
             ]
             .spacing(10)
-            .width(Length::Fill)
-            .into()
+            .into(),
         };
+        let panel = column![
+            text(heading).size(23),
+            status_card,
+            text(self.archive_error.as_deref().unwrap_or(""))
+                .size(12)
+                .color(Color::from_rgb8(235, 145, 140)),
+            tabs,
+            body
+        ]
+        .spacing(10)
+        .width(Length::Fill)
+        .height(if compact {
+            Length::Shrink
+        } else {
+            Length::Fill
+        });
         let content: Element<'_, Message> = if compact {
-            scrollable(column![board_area, panel].spacing(24))
+            scrollable(column![container(board_area).center_x(Length::Fill), panel].spacing(18))
                 .height(Length::Fill)
                 .into()
         } else {
             row![
-                board_area,
-                scrollable(panel).width(340).height(Length::Fill)
+                container(board_area)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                container(panel).width(340).height(Length::Fill)
             ]
-            .spacing(28)
+            .spacing(20)
+            .height(Length::Fill)
             .into()
         };
-        container(column![top, content].spacing(24).padding(24))
+        container(column![header, content].spacing(16).padding(20))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -2087,6 +2362,81 @@ mod tests {
             Some(Ok(UpdateStatus::Available(_)))
         ));
         assert_eq!(app.game.fen(), Game::default().fen());
+    }
+
+    #[test]
+    fn separate_analysis_preserves_the_game_and_cancels_stale_search() {
+        let mut app = App::default();
+        app.mode = Mode::Local;
+        app.game.play_uci("e2e4").unwrap();
+        let live_fen = app.game.fen();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.search_cancel = Some(Arc::clone(&cancel));
+        app.busy = true;
+        let old_generation = app.generation;
+        let _ = app.update(Message::Navigate(Screen::Analysis));
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(app.mode, Mode::Analysis);
+        app.game.play_uci("e7e5").unwrap();
+        let _ = app.update(Message::Engine(old_generation, Err("stale".into())));
+        let _ = app.update(Message::Navigate(Screen::Settings));
+        let _ = app.update(Message::Navigate(Screen::Game));
+        assert_eq!(app.game.fen(), live_fen);
+        assert_eq!(app.mode, Mode::Local);
+    }
+
+    #[test]
+    fn completed_games_are_archived_once_and_open_for_analysis() {
+        let mut app = App::default();
+        app.mode = Mode::Local;
+        let dir = std::env::temp_dir().join(format!(
+            "ferrum-ui-history-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.archive_dir = Some(dir.clone());
+        app.game.play_uci("e2e4").unwrap();
+        let _ = app.update(Message::RequestDraw);
+        let _ = app.update(Message::ConfirmResult);
+        let _ = app.update(Message::Flip);
+        assert_eq!(archive::load(&dir).unwrap().0.len(), 1);
+        let _ = app.update(Message::Navigate(Screen::History));
+        assert_eq!(app.archive_entries.len(), 1);
+        let _ = app.update(Message::OpenArchived(0));
+        assert_eq!(app.screen, Screen::Analysis);
+        assert_eq!(app.game.result(), "1/2-1/2");
+        let _ = app.update(Message::Undo);
+        assert!(!app.game.is_game_over());
+        let _ = app.update(Message::Navigate(Screen::Game));
+        assert!(app.game.is_game_over());
+        assert_eq!(archive::load(&dir).unwrap().0.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn all_screens_construct_at_narrow_and_maximized_sizes() {
+        let mut app = App::default();
+        for size in [
+            Size::new(520.0, 500.0),
+            Size::new(1200.0, 800.0),
+            Size::new(1920.0, 1080.0),
+        ] {
+            for screen in [
+                Screen::Game,
+                Screen::Analysis,
+                Screen::History,
+                Screen::Settings,
+            ] {
+                app.screen = screen;
+                for tab in [PanelTab::Moves, PanelTab::Actions, PanelTab::Position] {
+                    app.panel_tab = tab;
+                    let _ = app.layout(size);
+                }
+            }
+        }
     }
 
     #[test]

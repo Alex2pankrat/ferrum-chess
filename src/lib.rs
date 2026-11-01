@@ -4,4 +4,5 @@ pub mod clock;
 pub mod engine;
 pub mod game;
 pub mod report;
+pub mod session;
 pub mod updates;

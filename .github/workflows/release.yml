@@ -23,7 +23,18 @@ jobs:
         with:
           tool: cargo-deny
       - name: Check licenses for Windows dependencies
-        run: cargo deny check licenses
+        shell: pwsh
+        run: |
+          $lines = @(cargo deny check licenses 2>&1)
+          $code = $LASTEXITCODE
+          $lines | ForEach-Object { Write-Output "$_" }
+          if ($code -ne 0) {
+            $lines | Select-Object -Last 100 | ForEach-Object {
+              $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error::$message"
+            }
+            exit $code
+          }
       - name: Check version and tag
         shell: pwsh
         run: |

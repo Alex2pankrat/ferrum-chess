@@ -27,7 +27,7 @@ cargo build --release
 cargo run --release
 ```
 
-For Linux local builds, iced/rfd may require native windowing libraries, for example `libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev` on Debian/Ubuntu. Install Stockfish separately for local builds: the application looks for `stockfish.exe` (or `stockfish` on Unix) beside its own executable, then on `PATH`. Alternatively set `FERRUM_STOCKFISH` to the executable path. For example, place `stockfish.exe` next to `target/release/ferrum-chess.exe`.
+For Linux local builds, iced/rfd may require native windowing libraries, for example `libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev libssl-dev pkg-config` on Debian/Ubuntu. Install Stockfish separately for local builds: the application looks for `stockfish.exe` (or `stockfish` on Unix) beside its own executable, then on `PATH`. Alternatively set `FERRUM_STOCKFISH` to the executable path. For example, place `stockfish.exe` next to `target/release/ferrum-chess.exe`.
 
 Before a PR run:
 

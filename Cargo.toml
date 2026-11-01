@@ -10,7 +10,7 @@ repository = "https://github.com/Alex2pankrat/ferrum-chess"
 iced = { version = "0.14", features = ["canvas", "svg", "tokio"] }
 cozy-chess = { version = "0.3.4", features = ["std"] }
 rfd = "0.15"
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+ureq = { version = "3.5", default-features = false, features = ["native-tls-no-default"] }
 serde_json = "1"
 semver = "1"
 open = { version = "5", features = ["shellexecute-on-windows"] }

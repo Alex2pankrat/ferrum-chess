@@ -29,10 +29,8 @@ jobs:
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output "$_" }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 8 | ForEach-Object {
-              $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-              Write-Output "::error::$message"
-            }
+            $message = (($lines | Select-Object -Last 120) -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error::$message"
             exit $code
           }
       - name: Check version and tag
@@ -66,10 +64,8 @@ jobs:
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output "$_" }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 8 | ForEach-Object {
-              $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-              Write-Output "::error::$message"
-            }
+            $message = (($lines | Select-Object -Last 120) -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error::$message"
             exit $code
           }
       - name: Unit and integration tests, including Stockfish and live update check
@@ -81,10 +77,8 @@ jobs:
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output "$_" }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 8 | ForEach-Object {
-              $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-              Write-Output "::error::$message"
-            }
+            $message = (($lines | Select-Object -Last 120) -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error::$message"
             exit $code
           }
       - name: Install cargo-dist and WiX

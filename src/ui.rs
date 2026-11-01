@@ -608,13 +608,11 @@ impl App {
                     && self.review.is_none()
                     && !self.game.is_game_over()
                     && !self.busy
-                {
-                    if self
+                    && self
                         .clock
                         .start(self.game.position.side_to_move(), Instant::now())
-                    {
-                        self.notice = "Clock running".into();
-                    }
+                {
+                    self.notice = "Clock running".into();
                 }
             }
             Message::ClockTick => {}

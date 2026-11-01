@@ -29,7 +29,7 @@ jobs:
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output "$_" }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 100 | ForEach-Object {
+            $lines | Select-Object -Last 8 | ForEach-Object {
               $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Output "::error::$message"
             }
@@ -62,11 +62,11 @@ jobs:
       - name: Clippy
         shell: pwsh
         run: |
-          $lines = @(cargo clippy --all-targets -- -D warnings 2>&1)
+          $lines = @(cargo clippy --quiet --all-targets -- -D warnings 2>&1)
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output "$_" }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 100 | ForEach-Object {
+            $lines | Select-Object -Last 8 | ForEach-Object {
               $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Output "::error::$message"
             }
@@ -81,7 +81,7 @@ jobs:
           $code = $LASTEXITCODE
           $lines | ForEach-Object { Write-Output "$_" }
           if ($code -ne 0) {
-            $lines | Select-Object -Last 100 | ForEach-Object {
+            $lines | Select-Object -Last 8 | ForEach-Object {
               $message = "$_".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Output "::error::$message"
             }

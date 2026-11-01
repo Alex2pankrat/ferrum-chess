@@ -7,6 +7,7 @@ use ferrum_chess::{
     engine::{self, Analysis},
     game::Game,
     report::{self, GameReport},
+    session::{self, Entry as SessionEntry, GameMode as SessionMode, Session},
     updates::{self, UpdateStatus},
 };
 use iced::{
@@ -156,6 +157,10 @@ struct App {
     play_snapshot: Option<PlaySnapshot>,
     archive_dir: Option<std::path::PathBuf>,
     archive_entries: Vec<ArchiveEntry>,
+    session_dir: Option<std::path::PathBuf>,
+    session_entries: Vec<SessionEntry>,
+    session_warning: Option<String>,
+    pending_resume: Option<usize>,
     archive_error: Option<String>,
     history_warning: Option<String>,
     last_archived_pgn: Option<String>,
@@ -195,6 +200,14 @@ impl Default for App {
                 archive::default_directory()
             },
             archive_entries: Vec::new(),
+            session_dir: if cfg!(test) {
+                None
+            } else {
+                session::default_directory()
+            },
+            session_entries: Vec::new(),
+            session_warning: None,
+            pending_resume: None,
             archive_error: None,
             history_warning: None,
             last_archived_pgn: None,
@@ -231,6 +244,10 @@ enum Message {
     Navigate(Screen),
     Panel(PanelTab),
     OpenArchived(usize),
+    SaveSession,
+    RequestResume(usize),
+    CancelResume,
+    ConfirmResume,
     BoardTheme(BoardTheme),
     PieceSet(PieceSet),
     Coordinates(bool),
@@ -484,12 +501,28 @@ impl App {
             Err(error) => self.history_warning = Some(error),
         }
     }
+    fn reload_sessions(&mut self) {
+        match self
+            .session_dir
+            .as_ref()
+            .ok_or_else(|| "Session directory is unavailable".to_owned())
+            .and_then(|dir| session::load(dir))
+        {
+            Ok((entries, skipped)) => {
+                self.session_entries = entries;
+                self.session_warning =
+                    (skipped > 0).then(|| format!("{skipped} saved session(s) could not be read"));
+            }
+            Err(error) => self.session_warning = Some(error),
+        }
+    }
     fn navigate(&mut self, screen: Screen) -> Task<Message> {
         if screen == self.screen {
             return Task::none();
         }
         self.clock.pause();
         self.invalidate();
+        self.pending_resume = None;
         if screen == Screen::Analysis && self.mode != Mode::Analysis {
             self.play_snapshot = Some(PlaySnapshot {
                 game: self.game.clone(),
@@ -518,6 +551,7 @@ impl App {
         self.panel_tab = PanelTab::Moves;
         if screen == Screen::History {
             self.reload_archive();
+            self.reload_sessions();
         }
         if screen == Screen::Game && self.review.is_none() {
             return self.maybe_search();
@@ -607,6 +641,76 @@ impl App {
                         }
                     }
                 }
+            }
+            Message::SaveSession => {
+                if self.screen != Screen::Game || self.mode == Mode::Analysis {
+                    return Task::none();
+                }
+                let game = self.review.as_ref().unwrap_or(&self.game).clone();
+                let session = Session {
+                    game,
+                    mode: if self.mode == Mode::Local {
+                        SessionMode::Local
+                    } else {
+                        SessionMode::Stockfish
+                    },
+                    player: self.player.side(),
+                    flipped: self.flipped,
+                    depth: self.depth,
+                };
+                let result = self
+                    .session_dir
+                    .as_ref()
+                    .ok_or_else(|| "Session directory is unavailable".to_owned())
+                    .and_then(|dir| session::save(dir, &session));
+                match result {
+                    Ok(()) => {
+                        self.session_warning = None;
+                        self.notice = "Progress saved locally. Clock times are not saved.".into();
+                    }
+                    Err(error) => {
+                        self.session_warning = Some(error.clone());
+                        self.notice = error;
+                    }
+                }
+            }
+            Message::RequestResume(index) => {
+                if self.screen == Screen::History && index < self.session_entries.len() {
+                    self.pending_resume = Some(index);
+                }
+            }
+            Message::CancelResume => self.pending_resume = None,
+            Message::ConfirmResume => {
+                let Some(entry) = self
+                    .pending_resume
+                    .take()
+                    .and_then(|index| self.session_entries.get(index).cloned())
+                else {
+                    return Task::none();
+                };
+                self.clock.pause();
+                self.invalidate();
+                self.play_snapshot = None;
+                self.screen = Screen::Game;
+                self.panel_tab = PanelTab::Moves;
+                self.game = entry.session.game;
+                self.mode = match entry.session.mode {
+                    SessionMode::Stockfish => Mode::Play,
+                    SessionMode::Local => Mode::Local,
+                };
+                self.player = if entry.session.player == Side::White {
+                    Player::White
+                } else {
+                    Player::Black
+                };
+                self.flipped = entry.session.flipped;
+                self.depth = entry.session.depth;
+                self.clock = Clock::default();
+                self.review = None;
+                self.game_report = None;
+                self.last_archived_pgn = None;
+                self.notice = "Session restored; clock is off".into();
+                return self.maybe_search();
             }
             Message::BoardTheme(theme) => {
                 self.preferences.board = theme;
@@ -1068,8 +1172,16 @@ impl App {
                 Some(Err(error)) => updates = updates.push(text(error).size(13)),
                 None => {}
             }
+            let preview_size = (size.width - 120.0).clamp(160.0, 224.0);
+            let preview = Canvas::new(AppearancePreview {
+                preferences: &self.preferences,
+            })
+            .width(preview_size)
+            .height(preview_size);
             let appearance = column![
                 text("Appearance").size(20),
+                text("Preview · starting position").size(12).color(muted()),
+                preview,
                 text("BOARD THEME").size(11).color(muted()),
                 pick_list(
                     [BoardTheme::Forest, BoardTheme::Walnut, BoardTheme::Slate],
@@ -1123,61 +1235,127 @@ impl App {
             .into();
         }
         if self.screen == Screen::History {
-            let items: Element<'_, Message> = if self.archive_entries.is_empty() {
-                text("No completed games saved yet. Completed games are saved on this device.")
-                    .size(15)
-                    .color(muted())
-                    .into()
-            } else {
-                column(self.archive_entries.iter().enumerate().map(|(i, entry)| {
-                    button(
-                        row![
-                            column![
-                                text(format!("Game {}  ·  {}", i + 1, entry.result)).size(17),
-                                text(format!(
-                                    "{}  ·  {} plies  ·  {}",
-                                    entry.mode,
-                                    entry.plies,
-                                    archive::display_date(entry.timestamp_ms)
-                                ))
-                                .size(12)
-                                .color(muted())
-                            ]
-                            .spacing(4)
-                            .width(Length::Fill),
-                            text("Open in analysis  →").size(13)
-                        ]
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .on_press(Message::OpenArchived(i))
-                    .style(button::secondary)
-                    .padding(14)
-                    .width(Length::Fill)
-                    .into()
-                }))
+            let mut entries = iced::widget::Column::new()
                 .spacing(8)
+                .push(text("Saved sessions").size(19));
+            if self.session_entries.is_empty() {
+                entries = entries.push(
+                    text("No saved unfinished games. Use Save progress on the game screen.")
+                        .size(13)
+                        .color(muted()),
+                );
+            } else {
+                for (index, entry) in self.session_entries.iter().enumerate() {
+                    let label = match entry.session.mode {
+                        SessionMode::Local => "Local",
+                        SessionMode::Stockfish => "Stockfish",
+                    };
+                    entries = entries.push(
+                        button(
+                            row![
+                                column![
+                                    text(format!(
+                                        "{label}  ·  {} plies",
+                                        entry.session.game.moves().len()
+                                    ))
+                                    .size(16),
+                                    text(archive::display_date(entry.timestamp_ms))
+                                        .size(12)
+                                        .color(muted()),
+                                ]
+                                .spacing(4)
+                                .width(Length::Fill),
+                                text("Resume  →").size(13)
+                            ]
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .on_press(Message::RequestResume(index))
+                        .style(button::secondary)
+                        .padding(14)
+                        .width(Length::Fill),
+                    );
+                }
+            }
+            entries = entries.push(text("Completed games").size(19));
+            if self.archive_entries.is_empty() {
+                entries = entries.push(
+                    text("No completed games saved yet.")
+                        .size(13)
+                        .color(muted()),
+                );
+            } else {
+                for (i, entry) in self.archive_entries.iter().enumerate() {
+                    entries = entries.push(
+                        button(
+                            row![
+                                column![
+                                    text(format!("Game {}  ·  {}", i + 1, entry.result)).size(17),
+                                    text(format!(
+                                        "{}  ·  {} plies  ·  {}",
+                                        entry.mode,
+                                        entry.plies,
+                                        archive::display_date(entry.timestamp_ms)
+                                    ))
+                                    .size(12)
+                                    .color(muted()),
+                                ]
+                                .spacing(4)
+                                .width(Length::Fill),
+                                text("Open in analysis  →").size(13)
+                            ]
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .on_press(Message::OpenArchived(i))
+                        .style(button::secondary)
+                        .padding(14)
+                        .width(Length::Fill),
+                    );
+                }
+            }
+            let confirm: Element<'_, Message> = if self.pending_resume.is_some() {
+                container(
+                    column![
+                        text("Replace the current game with this saved session?").size(15),
+                        text("Unsaved progress will be lost; clock times are not restored.")
+                            .size(12)
+                            .color(muted()),
+                        row![
+                            button("Resume game").on_press(Message::ConfirmResume),
+                            button("Cancel")
+                                .on_press(Message::CancelResume)
+                                .style(button::secondary)
+                        ]
+                        .spacing(8)
+                    ]
+                    .spacing(8),
+                )
+                .padding(12)
+                .width(Length::Fill)
+                .style(card_style)
                 .into()
+            } else {
+                iced::widget::space().height(0).into()
             };
             return container(
                 column![
                     header,
                     text("Game history").size(28),
-                    text(
-                        "Completed games are stored locally. Select one to review and analyze it."
-                    )
-                    .size(14)
-                    .color(muted()),
+                    text("Games are stored on this device.")
+                        .size(14)
+                        .color(muted()),
+                    confirm,
                     text(
                         self.archive_error
                             .as_deref()
                             .or(self.history_warning.as_deref())
+                            .or(self.session_warning.as_deref())
                             .unwrap_or("")
                     )
                     .size(13)
                     .color(Color::from_rgb8(235, 145, 140)),
-                    scrollable(items).height(Length::Fill)
+                    scrollable(entries).height(Length::Fill)
                 ]
-                .spacing(16)
+                .spacing(12)
                 .padding(20),
             )
             .width(Length::Fill)
@@ -1385,6 +1563,14 @@ impl App {
                 } else {
                     Length::Fill
                 };
+                let save_session: Element<'_, Message> = if is_analysis {
+                    iced::widget::space().height(0).into()
+                } else {
+                    button("Save progress")
+                        .on_press(Message::SaveSession)
+                        .style(button::secondary)
+                        .into()
+                };
                 let analyze = if is_analysis {
                     button("Analyze position").on_press(Message::Analyze)
                 } else {
@@ -1425,7 +1611,7 @@ impl App {
                         .width(Length::Fill)
                         .height(move_height)
                         .style(card_style),
-                    analyze.style(button::secondary),
+                    row![analyze.style(button::secondary), save_session].spacing(6),
                 ]
                 .spacing(10)
                 .height(if compact {
@@ -1788,6 +1974,91 @@ fn arrow_head(from: Point, to: Point, cell: f32) -> Option<(Point, Point, Point)
     ))
 }
 
+/// A non-interactive starting position, independent of the current game.
+struct AppearancePreview<'a> {
+    preferences: &'a Preferences,
+}
+fn preview_square(x: usize, y: usize) -> Option<Square> {
+    if x >= 8 || y >= 8 {
+        return None;
+    }
+    Square::try_index((7 - y) * 8 + x)
+}
+impl canvas::Program<Message> for AppearancePreview<'_> {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let cell = bounds.width.min(bounds.height) / 8.0;
+        let board = cozy_chess::Board::default();
+        for y in 0..8 {
+            for x in 0..8 {
+                let Some(square) = preview_square(x, y) else {
+                    continue;
+                };
+                let top_left = Point::new(x as f32 * cell, y as f32 * cell);
+                let light = (x + y) % 2 == 0;
+                frame.fill_rectangle(
+                    top_left,
+                    Size::new(cell, cell),
+                    board_color(self.preferences.board, light),
+                );
+                if let (Some(color), Some(piece)) = (board.color_on(square), board.piece_on(square))
+                {
+                    frame.draw_svg(
+                        Rectangle {
+                            x: top_left.x + cell * 0.025,
+                            y: top_left.y + cell * 0.025,
+                            width: cell * 0.95,
+                            height: cell * 0.95,
+                        },
+                        piece_handle(self.preferences.pieces, color, piece),
+                    );
+                }
+                if self.preferences.coordinates {
+                    let name = square.to_string();
+                    let color = if light {
+                        Color::from_rgb8(99, 127, 101)
+                    } else {
+                        Color::from_rgb8(226, 230, 208)
+                    };
+                    if x == 0 {
+                        frame.fill_text(canvas::Text {
+                            content: name[1..2].into(),
+                            position: Point::new(
+                                top_left.x + cell * 0.06,
+                                top_left.y + cell * 0.04,
+                            ),
+                            size: (cell * 0.17).into(),
+                            color,
+                            ..canvas::Text::default()
+                        });
+                    }
+                    if y == 7 {
+                        frame.fill_text(canvas::Text {
+                            content: name[..1].into(),
+                            position: Point::new(
+                                top_left.x + cell * 0.82,
+                                top_left.y + cell * 0.79,
+                            ),
+                            size: (cell * 0.17).into(),
+                            color,
+                            ..canvas::Text::default()
+                        });
+                    }
+                }
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 #[derive(Default)]
 struct BoardState {
     pressed: Option<(Square, Point)>,
@@ -2098,6 +2369,66 @@ mod tests {
         assert_eq!(app.game.fen(), fen);
         let _ = app.update(Message::Flip);
         assert!(!app.flipped);
+    }
+
+    #[test]
+    fn appearance_preview_uses_initial_position_and_current_preferences() {
+        let mut app = App::default();
+        app.game.play_uci("e2e4").unwrap();
+        let before = app.game.fen();
+        app.preferences.board = BoardTheme::Walnut;
+        app.preferences.pieces = PieceSet::Meridian;
+        app.preferences.coordinates = false;
+        let preview = AppearancePreview {
+            preferences: &app.preferences,
+        };
+        assert_eq!(preview.preferences.board, BoardTheme::Walnut);
+        assert_eq!(preview.preferences.pieces, PieceSet::Meridian);
+        assert!(!preview.preferences.coordinates);
+        assert_eq!(preview_square(0, 0), Some(Square::A8));
+        assert_eq!(preview_square(7, 7), Some(Square::H1));
+        assert_eq!(preview_square(8, 0), None);
+        assert_eq!(
+            cozy_chess::Board::default().piece_on(Square::E2),
+            Some(Role::Pawn)
+        );
+        assert_eq!(app.game.fen(), before);
+    }
+
+    #[test]
+    fn saved_session_requires_confirmation_and_restores_game_settings() {
+        let mut app = App::default();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrum-ui-session-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.session_dir = Some(dir.clone());
+        app.mode = Mode::Local;
+        app.game.play_uci("e2e4").unwrap();
+        app.depth = 6;
+        app.flipped = true;
+        let saved_fen = app.game.fen();
+        let _ = app.update(Message::SaveSession);
+        app.game.play_uci("e7e5").unwrap();
+        let current_fen = app.game.fen();
+        let _ = app.update(Message::Navigate(Screen::History));
+        assert_eq!(app.session_entries.len(), 1);
+        let _ = app.update(Message::RequestResume(0));
+        let _ = app.update(Message::CancelResume);
+        assert_eq!(app.game.fen(), current_fen);
+        let _ = app.update(Message::RequestResume(0));
+        let _ = app.update(Message::ConfirmResume);
+        assert_eq!(app.screen, Screen::Game);
+        assert_eq!(app.game.fen(), saved_fen);
+        assert_eq!(app.mode, Mode::Local);
+        assert_eq!(app.depth, 6);
+        assert!(app.flipped);
+        assert!(!app.clock.enabled());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
